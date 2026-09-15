@@ -117,6 +117,25 @@ def test_traced_attaches_and_removes_logging_filter() -> None:
     assert len(ctx.log.filters) == 0
 
 
+def test_traced_also_filters_get_dagster_logger() -> None:
+    """Integrations (dagster_dbt confirmed by example) log via get_dagster_logger(),
+    a separate global logger from context.log -- verified against a real
+    @dbt_assets run (examples/dagster_workspace/definitions.py) that those lines
+    came through with no trace_id/span_id until this was added. Regression-test the
+    mechanism here without needing dbt: filtering get_dagster_logger() should work
+    the same way context.log's filtering does."""
+    from dagster import get_dagster_logger
+
+    @traced()
+    def my_op(context) -> None:
+        assert len(get_dagster_logger().filters) == 1
+
+    ctx = make_context(FakeInstance(), "run-1", ["my_op"])
+    assert len(get_dagster_logger().filters) == 0
+    my_op(ctx)
+    assert len(get_dagster_logger().filters) == 0
+
+
 def test_traced_removes_filter_even_if_func_raises() -> None:
     @traced()
     def failing_op(context) -> None:

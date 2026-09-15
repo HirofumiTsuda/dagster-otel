@@ -38,6 +38,7 @@ from contextlib import contextmanager
 from functools import wraps
 from typing import Any, Concatenate, ParamSpec, Protocol, TypeVar, overload
 
+from dagster import get_dagster_logger
 from opentelemetry import trace
 
 from dagster_otel._logging import TraceContextFilter
@@ -52,6 +53,7 @@ from dagster_otel._types import ExecutionContext
 
 _tracer = trace.get_tracer("dagster_otel")
 
+C = TypeVar("C", bound=ExecutionContext)
 P = ParamSpec("P")
 R = TypeVar("R")
 Y = TypeVar("Y")
@@ -60,7 +62,15 @@ Rt = TypeVar("Rt")
 
 #: An op/asset compute function: first positional arg is the execution context,
 #: everything after that is whatever the wrapped function itself declares.
-ComputeFn = Callable[Concatenate[ExecutionContext, P], R]
+#:
+#: The context parameter is generic (bound=ExecutionContext), not just
+#: ExecutionContext outright -- caught by pyright (not mypy) against a real example:
+#: real op/asset code is normally typed with the *specific* context type it expects
+#: (`AssetExecutionContext`, not the `OpExecutionContext | AssetExecutionContext`
+#: union), and a fixed-Union parameter type rejects a narrower one by function
+#: parameter contravariance. Generic C lets `traced()` accept and preserve whichever
+#: specific context type -- or the union -- the wrapped function actually declares.
+ComputeFn = Callable[Concatenate[C, P], R]
 
 
 class _TracedDecorator(Protocol):
@@ -69,10 +79,10 @@ class _TracedDecorator(Protocol):
 
     @overload
     def __call__(
-        self, func: ComputeFn[P, Generator[Y, S, Rt]]
-    ) -> ComputeFn[P, Generator[Y, S, Rt]]: ...
+        self, func: ComputeFn[C, P, Generator[Y, S, Rt]]
+    ) -> ComputeFn[C, P, Generator[Y, S, Rt]]: ...
     @overload
-    def __call__(self, func: ComputeFn[P, R]) -> ComputeFn[P, R]: ...
+    def __call__(self, func: ComputeFn[C, P, R]) -> ComputeFn[C, P, R]: ...
 
 
 @contextmanager
@@ -97,6 +107,26 @@ def _traced_span(context: ExecutionContext, name: str) -> Generator[None, None, 
         _seed_run_root_context(context)
 
     log_filter = TraceContextFilter()
+    # context.log alone misses log lines integrations emit on their own behalf --
+    # verified against a real @dbt_assets run: dagster_dbt's own progress messages
+    # ("Running dbt command...", etc.) go through `get_dagster_logger()`
+    # (`dagster_dbt/core/dbt_cli_invocation.py`: `logger = get_dagster_logger()`), a
+    # separate, global `"dagster.builtin"` logger -- not context.log -- even though
+    # both end up formatted identically via the same DagsterLogHandler (attached to
+    # both as one of DagsterLogManager's managed_loggers). A filter added to
+    # context.log alone never sees records that originate on a different Logger, so
+    # those lines came through with no trace_id/span_id at all. get_dagster_logger()
+    # is documented public API, same status as context.log, so tagging it too is in
+    # scope the same way -- not reaching into anything undocumented.
+    #
+    # Caveat: unlike context.log, get_dagster_logger() is one shared, process-wide
+    # Logger, not scoped to this step. Fine under Dagster's normal execution model
+    # (multiprocess/k8s give each step its own process; in_process runs steps
+    # sequentially, not concurrently) -- but if that ever changes, concurrent
+    # @traced() steps in one process could stamp each other's dagster.builtin-routed
+    # log lines with the wrong span while both are active.
+    dagster_builtin_log = get_dagster_logger()
+
     with _tracer.start_as_current_span(name):
         if trace_context is None:
             # Nothing published yet in this run -- this is the first @traced() step
@@ -107,10 +137,12 @@ def _traced_span(context: ExecutionContext, name: str) -> Generator[None, None, 
             # root step that calls publish_trace_context() by hand.
             publish_trace_context(context)
         context.log.addFilter(log_filter)
+        dagster_builtin_log.addFilter(log_filter)
         try:
             yield
         finally:
             context.log.removeFilter(log_filter)
+            dagster_builtin_log.removeFilter(log_filter)
 
 
 def traced(span_name: str | None = None) -> _TracedDecorator:

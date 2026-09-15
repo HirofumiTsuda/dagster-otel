@@ -40,12 +40,14 @@ from typing import Any, Concatenate, ParamSpec, Protocol, TypeVar, overload
 
 from dagster import get_dagster_logger
 from opentelemetry import trace
+from opentelemetry.trace import Link
 
 from dagster_otel._logging import TraceContextFilter
 from dagster_otel._propagation import (
     _activate_trace_context,
-    _find_trace_context,
     _seed_run_root_context,
+    carrier_to_span_context,
+    find_upstream_trace_contexts,
     publish_trace_context,
 )
 from dagster_otel._setup import configure
@@ -95,16 +97,27 @@ def _traced_span(context: ExecutionContext, name: str) -> Generator[None, None, 
     # available at this call site.
     configure()
 
-    trace_context = _find_trace_context(context)
-    if trace_context is not None:
-        _activate_trace_context(trace_context)
+    # Every real, direct upstream dependency that has itself published a trace
+    # context (see _propagation.py's module docstring for why "real dependency",
+    # not "nearest enclosing subgraph"). Ordered deterministically: the first becomes
+    # this span's actual parent, any rest become Links -- fan-in (e.g. a merge step
+    # depending on two independent roots) is then visible as extra Links on the span
+    # rather than silently collapsing onto whichever upstream happened to be found.
+    upstream_contexts = find_upstream_trace_contexts(context)
+    if upstream_contexts:
+        primary_context, *secondary_contexts = upstream_contexts
+        _activate_trace_context(primary_context)
+        links = [Link(carrier_to_span_context(c)) for c in secondary_contexts]
     else:
-        # No real parent found. Don't fall through to a fresh, randomly-generated
-        # trace_id -- that's what caused the confirmed multi-root collision (see
-        # _propagation.py module docstring): every step derives the same trace_id
-        # deterministically from the run ID instead, so independent branches still
-        # end up in one trace even when none of them can find a real parent.
+        # No real parent found -- a genuine root, or every direct upstream is
+        # untraced (see _propagation.py's "Residual limitation"). Don't fall through
+        # to a fresh, randomly-generated trace_id -- that's what caused the confirmed
+        # multi-root collision (see _propagation.py module docstring): every step
+        # derives the same trace_id deterministically from the run ID instead, so
+        # independent branches still end up in one trace even when none of them can
+        # find a real parent.
         _seed_run_root_context(context)
+        links = []
 
     log_filter = TraceContextFilter()
     # context.log alone misses log lines integrations emit on their own behalf --
@@ -127,15 +140,15 @@ def _traced_span(context: ExecutionContext, name: str) -> Generator[None, None, 
     # log lines with the wrong span while both are active.
     dagster_builtin_log = get_dagster_logger()
 
-    with _tracer.start_as_current_span(name):
-        if trace_context is None:
-            # Nothing published yet in this run -- this is the first @traced() step
-            # to execute, so it becomes the root of the trace. Covers both "this
-            # really is upstream of everything else" and "a partial/--select run
-            # skipped whatever would normally run first": either way, every step
-            # still ends up in *some* trace instead of needing a manually-designated
-            # root step that calls publish_trace_context() by hand.
-            publish_trace_context(context)
+    with _tracer.start_as_current_span(name, links=links):
+        # Published unconditionally now, not just when this step turns out to have
+        # no parent (the old subgraph-keyed design's behavior): every step publishes
+        # under its own step key (see _propagation.py), because it's each step's own
+        # publish that lets whatever depends on *it* find its real parent. A step
+        # with no real parent still ends up as the (deterministic-seed) root of the
+        # trace -- it just gets there via _seed_run_root_context above rather than a
+        # special case here.
+        publish_trace_context(context)
         context.log.addFilter(log_filter)
         dagster_builtin_log.addFilter(log_filter)
         try:

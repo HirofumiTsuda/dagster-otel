@@ -2,11 +2,13 @@
 
 No real Dagster instance/run is used anywhere here -- these are lightweight stand-ins
 providing only the attributes dagster_otel actually touches (`op_handle.path`,
-`run_id`, `instance.get_run_by_id`/`add_run_tags`, `log`). See the verify-tracing
-skill for why that's a deliberate scope limit, not an oversight: these tests can prove
-the Python logic is internally consistent, not that Dagster still behaves the way this
-library assumes it does -- that needs a real instance (verify-tracing/
-verify-dagster-version-compat skills), which these tests don't replace.
+`run_id`, `instance.get_run_by_id`/`add_run_tags`, `log`,
+`get_step_execution_context().step.step_inputs[*].dependency_keys`). See the
+verify-tracing skill for why that's a deliberate scope limit, not an oversight: these
+tests can prove the Python logic is internally consistent, not that Dagster still
+behaves the way this library assumes it does -- that needs a real instance
+(verify-tracing/verify-dagster-version-compat skills), which these tests don't
+replace.
 """
 import logging
 from types import SimpleNamespace
@@ -68,7 +70,7 @@ def _reset_otel_context():
 class FakeInstance:
     """Stands in for DagsterInstance. Backs run tags and run parentage with a plain
     dict, the same shape dagster_otel actually reads (run.tags / run.parent_run_id) --
-    see _propagation.py's publish_trace_context/_find_trace_context/
+    see _propagation.py's publish_trace_context/find_upstream_trace_contexts/
     _run_id_and_ancestors, the only things that touch `context.instance`."""
 
     def __init__(self) -> None:
@@ -91,18 +93,31 @@ def make_context(
     instance: FakeInstance,
     run_id: str,
     op_path: list[str],
+    deps: list[str] | None = None,
 ) -> ExecutionContext:
     """A fake op/asset execution context with just enough surface for dagster_otel:
     op_handle.path, run_id, instance, log_event (unused since the run-tags switch, but
-    harmless to keep), and log (a real logging.Logger -- context.log is a genuine
-    logging.Logger subclass in real Dagster too, see _logging.py's module docstring,
-    so using a plain one here matches the real shape rather than faking it)."""
+    harmless to keep), log (a real logging.Logger -- context.log is a genuine
+    logging.Logger subclass in real Dagster too, see _logging.py's module docstring, so
+    using a plain one here matches the real shape rather than faking it), and
+    get_step_execution_context().step.step_inputs[*].dependency_keys -- the same public
+    method (see _propagation.py's _upstream_step_keys docstring) real Dagster defines
+    identically on both OpExecutionContext and AssetExecutionContext, so this fake
+    doesn't need to model the two context shapes differently either.
+
+    :param deps: step_keys this step directly depends on, matching real Dagster's
+        `StepInput.dependency_keys` -- e.g. `deps=["root_op"]` for a step whose only
+        input comes from a step named `root_op`. Defaults to no dependencies (a root).
+    """
     if instance.get_run_by_id(run_id) is None:
         instance.create_run(run_id)
+    step_inputs = [SimpleNamespace(dependency_keys={dep}) for dep in (deps or [])]
+    step_execution_context = SimpleNamespace(step=SimpleNamespace(step_inputs=step_inputs))
     return SimpleNamespace(  # type: ignore[return-value]
         op_handle=SimpleNamespace(path=op_path),
         run_id=run_id,
         instance=instance,
         log_event=lambda event: None,
         log=logging.getLogger(f"test.{run_id}.{'.'.join(op_path)}"),
+        get_step_execution_context=lambda: step_execution_context,
     )

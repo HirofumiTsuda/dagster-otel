@@ -4,8 +4,9 @@ Dagster's multiprocess and k8s executors run each step in its own process (often
 a different node entirely), so there is no shared memory to pass an OTel trace context
 through directly. This module instead uses Dagster's own run storage -- which every
 step process can already read and write via `context.instance`, regardless of executor
-or node -- as the transport: the root step publishes the trace context as a run tag,
-and every other step looks it up from there.
+or node -- as the transport: every step publishes its own trace context as a run tag,
+keyed by its own step key, and every downstream step looks up its *real* upstream
+step(s) by the same key.
 
 This piggybacks on a problem Dagster has already solved for itself (making state visible
 to every step of a run, on any executor) instead of re-solving cross-process/cross-node
@@ -14,12 +15,13 @@ communication from scratch.
 Design and the core trick (publish trace context as run-scoped state, readable by every
 step) verified against the approach and prior art in
 https://github.com/Form-Energy/formenergy-observability, which shipped the same idea
-for @op using AssetMaterialization events as the carrier. This module generalizes it to
-also work unmodified for @asset (both share the same OpExecutionContext-like surface
-under the hood), drops the op-defining decorator in favor of a plain function decorator
-(see _tracing.py) that can stack under Dagster's own @op/@asset, so this library never
-owns the op/asset definition, and uses run tags (see below) as the transport instead of
-AssetMaterialization events.
+for @op using AssetMaterialization events as the carrier, keyed by *subgraph path*
+rather than each step's own identity (see "Keyed by real step dependencies" below for
+why that changed). This module generalizes it to also work unmodified for @asset (both
+share the same OpExecutionContext-like surface under the hood), drops the op-defining
+decorator in favor of a plain function decorator (see _tracing.py) that can stack under
+Dagster's own @op/@asset, so this library never owns the op/asset definition, and uses
+run tags (see below) as the transport instead of AssetMaterialization events.
 
 **Why run tags, not AssetMaterialization events (as formenergy-observability does)**:
 verified directly (2026-09-15) that publishing via AssetMaterialization registers the
@@ -28,21 +30,49 @@ bookkeeping asset_key (e.g. `__dagster_otel_root__`) in Dagster's real asset cat
 Dagster UI, for jobs that use *no* assets at all. `instance.add_run_tags(run_id, tags)` /
 `run.tags` carries the same JSON payload through the same run-storage database, is
 readable from a freshly-opened `DagsterInstance` the same way (verified), and adds
-nothing to the asset catalog (verified: `instance.all_asset_keys()` stays empty). Also
-simpler: no need to filter/narrow a ~26-member DagsterEvent union to find the one
-event kind with a `.materialization` attribute (see git history if that filtering is
-ever needed again for another purpose).
+nothing to the asset catalog (verified: `instance.all_asset_keys()` stays empty).
 
-Known limitation, confirmed reproducible against both this module and the
-Form-Energy prior art it's based on (same architecture, same bug -- see
-docs/design.md): a job/run with more than one independent root (no dependency
-between them) can race on ROOT_TRACE_KEY, since whichever root's step happens to
-run first "wins" and every other independent root silently attaches to it instead of
-getting its own. `_seed_run_root_context` (below) bounds the damage: every step
-derives the same trace_id deterministically from `context.run_id`, so a step that
-can't find a real parent still lands in the *same trace* as the rest of the run
-instead of a completely disconnected one. Parent-span attribution among independent
-roots is still not guaranteed correct -- only the trace_id is.
+**Keyed by real step dependencies, not subgraph path (2026-09-15, Issue #5)**: the
+original design here (like formenergy-observability's) keyed published contexts by
+*subgraph path* -- correct for nesting depth, but unable to distinguish sibling
+top-level steps. Confirmed reproducible bug: two independent roots (`root_a`,
+`root_b`, no dependency between them) raced on the same shared key, and whichever
+published second silently "won" -- a downstream step of `root_a` could end up parented
+under `root_b` instead. Reproduced against this module *and* formenergy-observability
+(same architecture, same bug -- see docs/design.md), not something this
+reimplementation introduced.
+
+Fixed properly (not just bounded) by keying on each step's *real* dependencies, read
+from Dagster's own execution plan (`StepInput.dependency_keys`, verified against both
+`OpExecutionContext` and `AssetExecutionContext`, under the real multiprocess
+executor) instead of approximating from subgraph nesting. Every step now publishes
+under its own step key, and looks itself up by asking "what are my real upstream step
+keys" rather than "what's the nearest enclosing subgraph." Two independent roots
+simply have disjoint dependency sets now -- there's no shared key left to race on.
+Fan-in (a step with more than one direct upstream) is also handled properly: every
+upstream that has published is returned, not just one, so `_tracing.py` can make the
+first the real parent and the rest `Link`s.
+
+Reads dependency info via `context.get_step_execution_context()` -- defined on both
+`OpExecutionContext` and `AssetExecutionContext` (the latter delegates to the former),
+so no branching is needed between the two context shapes here, unlike elsewhere in
+this module. Not `@public` (no versioned-API guarantee) and its docstring says
+`:meta private:`, but it's also not underscore-prefixed, and its own docstring says
+exactly what this is doing with it: "Allows advanced users (e.g. framework authors) to
+punch through to the underlying step execution context." A step's own dependency keys
+specifically (`StepExecutionContext.step.step_inputs[i].dependency_keys`) still has no
+`@public` accessor of its own, so this remains an accepted-risk internal-API dependence
+overall (see docs/design.md's "no monkeypatching" section) -- a rename/move here is a
+loud AttributeError at call time, not a silent behavior change.
+
+Residual limitation (unrelated to any of the above, still tracked in Issue #5): an
+upstream step that *isn't* `@traced()` (or hasn't run yet when looked up, though
+Dagster's own execution order should prevent that for a real dependency) simply won't
+be found -- this only looks at *direct* dependencies, not transitively past an
+untraced one. `_seed_run_root_context` remains the fallback for that case, same as for
+a genuine root: every step derives the same trace_id deterministically from
+`context.run_id`, so even a step that can't find any real parent still lands in the
+*same trace* as the rest of the run.
 """
 
 import hashlib
@@ -55,12 +85,8 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 
 from dagster_otel._types import ExecutionContext
 
-#: Trace key used for the top-level/root span of a run, when the publishing step isn't
-#: inside a named subgraph.
-ROOT_TRACE_KEY = "__dagster_otel_root__"
-
-#: Run tag key prefix. Full tag key is this plus the trace key (see _trace_key_for) --
-#: e.g. "dagster_otel/trace_context/__dagster_otel_root__".
+#: Run tag key prefix. Full tag key is this plus the publishing step's own step key
+#: (see _own_step_key) -- e.g. "dagster_otel/trace_context/root_a".
 _TAG_PREFIX = "dagster_otel/trace_context/"
 
 
@@ -83,24 +109,34 @@ def _run_id_and_ancestors(context: ExecutionContext) -> list[str]:
     return run_ids
 
 
-def _trace_key_for(context: ExecutionContext) -> str:
-    """The event-log key this step should publish/look up its trace context under.
+def _own_step_key(context: ExecutionContext) -> str:
+    """This step's own identifier, in the same string form Dagster's own dependency
+    info (StepInput.dependency_keys, see _upstream_step_keys) uses to reference it --
+    verified these match (both are `".".join(op_handle.path)`-shaped)."""
+    return ".".join(context.op_handle.path)
 
-    Dagster represents subgraphs as dotted paths in `op_handle.path`. A step at the
-    top level of the graph uses ROOT_TRACE_KEY; a step nested in a subgraph uses the
-    subgraph's path, so sibling subgraphs (and root-level steps outside them) don't
-    collide.
-    """
-    path = context.op_handle.path
-    return ROOT_TRACE_KEY if len(path) <= 1 else ".".join(path[:-1])
+
+def _upstream_step_keys(context: ExecutionContext) -> frozenset[str]:
+    """The step_keys of every step whose output this step directly depends on, read
+    from Dagster's own execution plan. Empty for a step with no dependencies (a
+    genuine root).
+
+    `get_step_execution_context()` is defined identically on both OpExecutionContext
+    and AssetExecutionContext (the latter delegates to the former) -- no branching on
+    context shape needed here, unlike elsewhere in this module."""
+    keys: set[str] = set()
+    for step_input in context.get_step_execution_context().step.step_inputs:
+        keys.update(step_input.dependency_keys)
+    return frozenset(keys)
 
 
 def publish_trace_context(context: ExecutionContext) -> None:
-    """Publish the current span's trace context for other steps in this run to find.
+    """Publish the current span's trace context, under this step's own key, for
+    downstream steps to find.
 
-    Call this exactly once per run (or once per subgraph, for a step at that
-    subgraph's root) -- typically from whichever step runs first. Every other step
-    that uses @traced() will look this up automatically.
+    Call this from every `@traced()` step (see _tracing.py -- it does this for you),
+    not just ones that turn out to have no parent: a step's *own* publish is what lets
+    the steps that depend on *it* find their real parent.
     """
     span = trace.get_current_span()
     if span is None or span.get_span_context().span_id == 0:
@@ -111,36 +147,42 @@ def publish_trace_context(context: ExecutionContext) -> None:
     carrier: dict[str, str] = {}
     TraceContextTextMapPropagator().inject(carrier)
 
-    tag_key = _TAG_PREFIX + _trace_key_for(context)
+    tag_key = _TAG_PREFIX + _own_step_key(context)
     context.instance.add_run_tags(context.run_id, {tag_key: json.dumps(carrier)})
 
 
-def _find_trace_context(context: ExecutionContext) -> dict[str, str] | None:
-    """Look up the trace context published by publish_trace_context(), if any.
-
-    Falls back from this step's subgraph up to the run root, and searches ancestor
-    runs for retries. Returns None if nothing has been published yet -- callers should
-    treat that as "no context to attach to" rather than an error, since a step that
-    runs before the publishing step (or a job that never calls publish_trace_context
-    at all) is a normal, valid state, not a bug.
-    """
-    # All non-empty prefixes of the enclosing-subgraph path, longest (nearest) first
-    # -- e.g. ["a", "b", "c"] -> ["a.b.c", "a.b", "a"] -- then the run root as the
-    # final fallback.
-    path = context.op_handle.path[:-1]
-    trace_keys = [".".join(path[:i]) for i in range(len(path), 0, -1)]
-    trace_keys.append(ROOT_TRACE_KEY)
-
+def _find_context_for_step_key(context: ExecutionContext, step_key: str) -> dict[str, str] | None:
+    """The trace context a specific step published, if any -- searching this run and
+    (for retry-from-failure) ancestor runs."""
+    tag_key = _TAG_PREFIX + step_key
     for run_id in _run_id_and_ancestors(context):
         run = context.instance.get_run_by_id(run_id)
         if run is None:
             continue
-        for key in trace_keys:
-            tag_value = run.tags.get(_TAG_PREFIX + key)
-            if tag_value is not None:
-                result: dict[str, str] = json.loads(tag_value)
-                return result
+        tag_value = run.tags.get(tag_key)
+        if tag_value is not None:
+            result: dict[str, str] = json.loads(tag_value)
+            return result
     return None
+
+
+def find_upstream_trace_contexts(context: ExecutionContext) -> list[dict[str, str]]:
+    """The trace contexts of this step's real, direct upstream dependencies that have
+    themselves published one -- in deterministic (sorted step_key) order, so which one
+    `_tracing.py` treats as the real parent (vs. a Link, for fan-in) is stable rather
+    than dependent on lookup order.
+
+    Empty if this step has no dependencies (a genuine root) or none of its direct
+    dependencies have published (e.g. an untraced upstream, or -- shouldn't happen
+    given Dagster's own execution order, but not asserted against here -- looked up
+    before an upstream has run). Callers should treat empty the same as "no parent
+    found," not an error.
+    """
+    return [
+        carrier
+        for key in sorted(_upstream_step_keys(context))
+        if (carrier := _find_context_for_step_key(context, key)) is not None
+    ]
 
 
 def _activate_trace_context(carrier: dict[str, str]) -> None:
@@ -153,19 +195,26 @@ def _activate_trace_context(carrier: dict[str, str]) -> None:
     otel_context.attach(ctx)
 
 
+def carrier_to_span_context(carrier: dict[str, str]) -> trace.SpanContext:
+    """Recover just the SpanContext from a published carrier, without activating it
+    as the current context -- for building an OTel `Link` (fan-in's non-parent
+    upstreams), which needs a SpanContext, not a full context activation."""
+    ctx = TraceContextTextMapPropagator().extract(carrier)
+    return trace.get_current_span(ctx).get_span_context()
+
+
 def _seed_run_root_context(context: ExecutionContext) -> None:
     """Activate a context carrying a trace_id derived deterministically from the run
     ID, for a step that found no real parent to attach to (see module docstring for
-    why this exists -- it's a safety net against the multi-root collision, not a fix
-    for it). Every step that calls this for the same run computes the identical
-    trace_id independently, with no shared state and no race: unlike ROOT_TRACE_KEY,
-    there's nothing to publish first.
+    the cases this covers). Every step that calls this for the same run computes the
+    identical trace_id independently, with no shared state and no race.
 
-    The seeded span context is a NonRecordingSpan (Dagster's own event log, not this,
-    remains the source of truth for real parent/child spans -- see
-    publish_trace_context/_find_trace_context) with `is_remote=True`, the same shape
-    OTel's own propagators use for context received from outside the process. Its
-    span_id is a fixed placeholder (never a real span), only trace_id matters here.
+    The seeded span context is a NonRecordingSpan (Dagster's own run storage, not
+    this, remains the source of truth for real parent/child spans -- see
+    publish_trace_context/find_upstream_trace_contexts) with `is_remote=True`, the
+    same shape OTel's own propagators use for context received from outside the
+    process. Its span_id is a fixed placeholder (never a real span), only trace_id
+    matters here.
     """
     trace_id = int.from_bytes(hashlib.sha256(context.run_id.encode()).digest()[:16], "big")
     seed = NonRecordingSpan(

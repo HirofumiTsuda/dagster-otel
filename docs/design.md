@@ -303,12 +303,13 @@ follow-up step -- a decision to make again, with its own justification, if it co
 
 ## Resolved: `@traced()` now handles the root case itself
 
-`publish_trace_context` no longer needs a manually-written root step. `traced()`
-calls `_find_trace_context` itself; when it finds nothing (the first `@traced()` step
-to run in this run), it now auto-publishes for you (2026-09-15). So the common case is
-just `@traced()` on every op/asset, including what would be "the root" -- no special
-code path for it. `publish_trace_context` stays exported for advanced cases (manually
-marking a subgraph boundary, etc.), but isn't required for ordinary use. This also
+`publish_trace_context` no longer needs a manually-written root step. `traced()` calls
+it for every step unconditionally now (changed again as part of the Issue #5 rework
+below -- each step needs to publish under its *own* key regardless of whether it found
+a parent, since it's that publish that lets whatever depends on *it* find its real
+parent). So the common case is just `@traced()` on every op/asset, including what
+would be "the root" -- no special code path for it, and `publish_trace_context` stays
+exported only for advanced cases (manually marking a boundary, etc.). This also
 resolves the "root doesn't get the logging filter" gap noted earlier: the root's own
 `@traced()` call installs the filter the same as every other step's.
 
@@ -357,44 +358,62 @@ hasn't set `OTEL_EXPORTER_OTLP_TRACES_TIMEOUT`/`OTEL_EXPORTER_OTLP_TIMEOUT` them
 everywhere else. Reverified with the same unreachable-endpoint setup: ~1.2s per step
 instead of ~7s.
 
-## Known limitation: multi-root and fan-in graphs get the right trace, not always the right shape
+## Multi-root and fan-in: fixed by keying on real dependencies (Issue #5, 2026-09-15)
 
-Confirmed by direct testing (2026-09-15), not just reasoned through:
-
-**Multiple independent roots** (two steps with no dependency between them, e.g.
-`root_a` and `root_b` in the same job) race on `ROOT_TRACE_KEY`: whichever one's
-published context happens to be visible first when the other looks wins, and the
-loser's branch attaches to the *wrong* root. Reproduced against this repo,
-**and against Form-Energy's original `formenergy-observability`** (same
+**Original problem**, confirmed by direct testing (2026-09-15), not just reasoned
+through: the original design keyed a published trace context by *subgraph path*
+(`_trace_key_for`: `ROOT_TRACE_KEY` for a top-level step, else its enclosing
+subgraph's path) -- correct for nesting depth, but unable to distinguish sibling
+top-level steps. **Multiple independent roots** (two steps with no dependency between
+them, e.g. `root_a` and `root_b` in the same job) raced on the shared `ROOT_TRACE_KEY`:
+whichever one's published context happened to be visible first when the other looked
+won, and the loser's branch attached to the *wrong* root. Reproduced against this
+repo, **and against Form-Energy's original `formenergy-observability`** (same
 `SpanName.ROOT`-keyed design) -- not a bug this reimplementation introduced, a limit
 inherited from the prior art, apparently never noticed across 3+ years of use there.
-
-Fix applied: every step that finds no real parent now seeds its span's `trace_id`
-*deterministically from `context.run_id`* (`_seed_run_root_context`, SHA-256 of the
-run ID truncated to 128 bits) instead of letting a fresh span generate a random one.
-Verified: `root_a` and `root_b` now land in the *same trace* even when the race still
-happens -- no more silent disappearance into a disconnected trace. What's **not**
-fixed: which of the two becomes the OTel parent of a given downstream step is still
-arbitrary (confirmed: in one run `child_a` ended up parented under `root_b`, not
-`root_a`). The blast radius of the original bug (wrong trace entirely) is bounded; the
-cosmetic issue (wrong sibling as parent) remains.
-
 **Fan-in** (one step depending on outputs from more than one independently-traced
-upstream, e.g. `merge_op(root_a(), root_b())`) has the same root cause and isn't fixed
-by the above: OTel spans have exactly one parent, and `_find_trace_context` only ever
-returns one context. Confirmed: `merge_op`'s span attached to whichever of `root_a`/
-`root_b` its lookup happened to find, with **no trace-level indication it also depends
-on the other one at all** (though, same fix, both end up in the shared trace_id).
+upstream, e.g. `merge_op(root_a(), root_b())`) had the same root cause: OTel spans
+have exactly one parent, and the old lookup only ever returned one context, so
+`merge_op`'s span attached to whichever of `root_a`/`root_b` it happened to find, with
+no trace-level indication it also depended on the other one at all.
 
-Properly fixing either case needs the same missing piece: knowing a step's *actual*
-upstream step(s) from Dagster's real dependency graph, not the subgraph-path
-approximation `_trace_key_for` currently uses. OTel's `Link` mechanism (used by
-formenergy-observability's `ContextAwareTracer.start_new_linked_trace` for a related
-purpose) is the right primitive for fan-in once that graph is available -- attach a
-`Link` to every real upstream context, not just the one picked as parent. Getting the
-real dependency graph out of `context` (Dagster does expose step input/upstream-output
-info, but it's deeper internal-API surface than anything used so far) is unexplored;
-tracked here rather than attempted under time pressure.
+**Fix**: key published contexts by each step's own *real* identity
+(`_own_step_key`: `".".join(op_handle.path)`) instead of subgraph path, and look a
+step's parent(s) up by asking Dagster's own execution plan what its *actual* upstream
+step keys are (`StepInput.dependency_keys`, read via
+`context._step_execution_context.step.step_inputs` --
+`context.op_execution_context._step_execution_context...` for an
+`AssetExecutionContext` -- confirmed against a real multiprocess-executor run that
+this matches the same `".".join(op_handle.path)` naming `_own_step_key` uses).
+Two independent roots now simply have disjoint dependency sets -- there's no shared
+key left to race on. Every direct upstream that has published is returned
+(`find_upstream_trace_contexts`), not just one: `_tracing.py` makes the
+lexicographically-first the real OTel parent (deterministic, not lookup-order
+dependent) and attaches the rest as `Link`s, the primitive OTel provides for exactly
+this ("this span is also related to that one, but isn't its child") --
+formenergy-observability's `ContextAwareTracer.start_new_linked_trace` uses the same
+mechanism for a related purpose. `_seed_run_root_context`'s deterministic-`trace_id`
+fallback (SHA-256 of `context.run_id`, unchanged) is kept for a genuine root or a step
+whose only upstream(s) are untraced -- every step in a run still lands in the same
+trace even when no real parent is found.
+
+**Verified against real Dagster + Jaeger (2026-09-15)**, not just against
+`tests/`'s toy fixtures:
+- Multi-root (`root_a`/`root_b`, no dependency; `child_a`/`child_b` each depending on
+  one): Jaeger shows `child_a` `CHILD_OF` `root_a` and `child_b` `CHILD_OF` `root_b`,
+  every time -- no more race, no more wrong-sibling attachment.
+- Fan-in (`merge_op(root_a(), root_b())`): Jaeger shows `merge_op` `CHILD_OF` `root_a`
+  (deterministic primary parent -- `"root_a" < "root_b"`) and `FOLLOWS_FROM`
+  (OTel's `Link` reference type) `root_b` -- both real dependencies now visible on the
+  span, not just one.
+- `examples/`'s real `@dbt_assets` jaffle_shop pipeline re-materialized clean after
+  this change (regression check, single asset/step so doesn't exercise multi-root/
+  fan-in itself, but confirms the rewrite didn't break the common single-parent path).
+
+Residual limitation, not fixed by this and not expected to be: a step whose *direct*
+upstream isn't `@traced()` (so never published anything to find) won't be looked up
+transitively past it -- it falls back to `_seed_run_root_context` (same trace,
+no real parent edge), same as a genuine root.
 
 ## Verified against a real `@dbt_assets` pipeline (Issue #2, 2026-09-15)
 

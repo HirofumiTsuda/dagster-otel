@@ -69,7 +69,7 @@ def test_traced_root_auto_publishes_and_child_nests_under_it(spans) -> None:
     root_result = root_op(root_ctx)
     assert root_result == "root_done"
 
-    child_ctx = make_context(instance, "run-1", ["child_op"])
+    child_ctx = make_context(instance, "run-1", ["child_op"], deps=["root_op"])
     child_result = child_op(child_ctx, root_result)
     assert child_result == "root_done+child"
 
@@ -167,7 +167,45 @@ def test_traced_op_and_asset_share_propagation(spans) -> None:
         pass
 
     root_asset(make_context(instance, "run-1", ["root_asset"]))
-    child_op(make_context(instance, "run-1", ["child_op"]))
+    child_op(make_context(instance, "run-1", ["child_op"], deps=["root_asset"]))
 
     finished = {s.name: s for s in spans.get_finished_spans()}
     assert finished["child_op"].parent.span_id == finished["root_asset"].context.span_id
+
+
+def test_traced_fan_in_gets_real_parent_and_link_for_second_upstream(spans) -> None:
+    """Issue #5: a step depending on two independent upstreams should be parented
+    under one of them (deterministically, the lexicographically-first step_key) and
+    carry a Link to the other -- not silently attach to whichever upstream happened
+    to be found first, and not lose the second dependency's relationship entirely."""
+    instance = FakeInstance()
+
+    @traced()
+    def root_a(context) -> None:
+        pass
+
+    @traced()
+    def root_b(context) -> None:
+        pass
+
+    @traced()
+    def merge_op(context, a=None, b=None) -> None:
+        pass
+
+    root_a(make_context(instance, "run-1", ["root_a"]))
+    root_b(make_context(instance, "run-1", ["root_b"]))
+    merge_op(make_context(instance, "run-1", ["merge_op"], deps=["root_a", "root_b"]))
+
+    finished = {s.name: s for s in spans.get_finished_spans()}
+    merge_span = finished["merge_op"]
+    root_a_span = finished["root_a"]
+    root_b_span = finished["root_b"]
+
+    # "root_a" sorts before "root_b" -- deterministic primary parent.
+    assert merge_span.parent is not None
+    assert merge_span.parent.span_id == root_a_span.context.span_id
+    assert merge_span.context.trace_id == root_a_span.context.trace_id
+
+    # The other real dependency isn't lost -- it's a Link instead of the parent.
+    assert len(merge_span.links) == 1
+    assert merge_span.links[0].context.span_id == root_b_span.context.span_id

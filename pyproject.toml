@@ -39,6 +39,15 @@ lint = [
     "mypy==2.3.1",
     "pyright==1.1.414",
 ]
+# Kept out of the base dependencies, same reasoning as dagster-prometheus-exporter's
+# equivalent dbt group: dagster-dbt releases track the exact dagster patch they were
+# built against 1:1 (verified: 0.29.22 requires dagster==1.13.22, matching what's
+# actually installed here). `uv sync` (no flags) skips this group; running the
+# jaffle_shop example needs `uv sync --group dbt`.
+dbt = [
+    "dagster-dbt==0.29.22",
+    "dbt-duckdb",
+]
 
 [project.urls]
 Home = "https://github.com/HirofumiTsuda/dagster-otel"

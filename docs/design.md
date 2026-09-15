@@ -168,6 +168,26 @@ this library actually adds is narrower and different in kind: embedding trace/sp
 *into* the content of op/asset log lines specifically, which a log shipper can't do on
 its own since it doesn't know about the active OTel span.
 
+**Second scope gap found later, against a real `@dbt_assets` run (Issue #2,
+2026-09-15), and fixed the same day:** `context.log` alone doesn't cover log lines an
+*integration* emits on its own behalf. `dagster_dbt`'s own progress messages
+("Running dbt command...", etc.) go through `get_dagster_logger()`
+(`dagster_dbt/core/dbt_cli_invocation.py`: `logger = get_dagster_logger()`), a
+separate, global `"dagster.builtin"` logger, not `context.log` -- confirmed by running
+the real example (`examples/dagster_workspace/definitions.py`): those lines showed up
+in a captured `@logger` with no `trace_id`/`span_id` at all until `_traced_span` also
+filtered `get_dagster_logger()`. `get_dagster_logger()` is itself documented public
+API (same status as `context.log`), so this isn't reaching into anything undocumented
+-- and after the fix, the same dbt log lines carry the correct `trace_id`/`span_id`,
+verified to match the real span in Jaeger exactly.
+
+One caveat this introduces: unlike `context.log`, `get_dagster_logger()` returns one
+shared, process-wide `Logger`, not something scoped to the current step. Not an issue
+under Dagster's normal execution model (multiprocess/k8s give each step its own
+process; `in_process` runs steps sequentially, not concurrently) -- but if steps ever
+ran concurrently within one process, they could stamp each other's
+`dagster.builtin`-routed log lines with the wrong span while both are active.
+
 ## Design decision: run tags, not `AssetMaterialization` events, as the transport
 
 formenergy-observability (and this project's first working version) published the
@@ -375,6 +395,47 @@ purpose) is the right primitive for fan-in once that graph is available -- attac
 real dependency graph out of `context` (Dagster does expose step input/upstream-output
 info, but it's deeper internal-API surface than anything used so far) is unexplored;
 tracked here rather than attempted under time pressure.
+
+## Verified against a real `@dbt_assets` pipeline (Issue #2, 2026-09-15)
+
+`examples/` (see its own README) wraps the real `jaffle_shop` dbt project (copied from
+`dagster-prometheus-exporter`'s dev fixture of the same name) in `@traced()` and
+materializes it for real, closing the gap between this project's unit tests (hand-written
+toy ops/assets in `tests/`) and anything Dagster itself actually generates. Two things
+confirmed:
+
+- **Generator handling works against a real `@dbt_assets` function**, not just
+  hand-written toy generators -- `jaffle_shop_dbt_assets` (`yield from
+  dbt.cli(...).stream()`) produces a single, correctly-durationed span (~6.7s,
+  matching the actual `dbt build` wall-clock time) in Jaeger.
+- **`Definitions(loggers=...)` does reach `dagster asset materialize` runs**, once
+  explicitly selected via run config (`loggers: <name>: {}`) -- same activation
+  mechanism as `logger_defs` on a `@job`. Whether this answers
+  [dagster-io/dagster#12495](https://github.com/dagster-io/dagster/discussions/12495)'s
+  `zyd14` (who in 2024 found no way to do this) depends on whether `Definitions`
+  gained this parameter after that comment or it was just missed -- not established
+  here, only that it works on Dagster 1.13.22.
+
+Building and running this example also surfaced two real bugs neither unit tests nor
+hand-written toy fixtures had caught:
+
+1. The `get_dagster_logger()` log-correlation gap described above.
+2. **`ComputeFn`'s context parameter was a fixed `ExecutionContext` union, not
+   generic** -- caught by pyright (not mypy) on `jaffle_shop_dbt_assets`, which is
+   typed with the *specific* `AssetExecutionContext`, not the union. Real op/asset
+   code is normally typed with the specific context type it expects, not the union
+   this library's own type alias used internally; a fixed-union parameter type
+   rejects a narrower one by ordinary function-parameter contravariance. Fixed by
+   making the context parameter generic (`C = TypeVar("C", bound=ExecutionContext)`)
+   so `traced()` accepts and preserves whichever specific context type (or the
+   union) the wrapped function actually declares.
+
+Neither of these came up in `tests/`, since its fakes and toy functions were never
+typed as narrowly as real Dagster code is, and never exercised an integration's own
+logging. This is the concrete case for why Issue #2 (and #3, #4 -- verification
+against real Dagster behavior generally) matters beyond "more test coverage": each of
+these fixes came from behavior no amount of *unit* testing this library's own code in
+isolation would have surfaced.
 
 ## Open questions
 

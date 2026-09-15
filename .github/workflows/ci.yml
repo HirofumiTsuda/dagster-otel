@@ -45,4 +45,9 @@ jobs:
       - run: uv run mypy -p dagster_otel --explicit-package-bases
       - run: uv run mypy --explicit-package-bases tests/
 
-      - run: uv run pyright .
+      # Scoped to src/tests, not `.` -- examples/ needs the separate `dbt` group
+      # (dagster-dbt/dbt-duckdb), which this job doesn't sync. `uv run pyright .`
+      # picked up examples/ anyway (pyright walks the whole tree regardless of what's
+      # actually importable) and failed on the missing dagster_dbt import; caught by
+      # this exact job failing on the PR that added examples/.
+      - run: uv run pyright src tests

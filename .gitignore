@@ -27,3 +27,9 @@ TODO.md
 # Claude Code: settings.json (shared) is committed; settings.local.json is a
 # per-user permission allowlist and isn't meant to be shared.
 .claude/settings.local.json
+
+# examples/jaffle_shop: dbt build/parse output, same treatment as
+# dagster-prometheus-exporter's dev/jaffle_shop.
+examples/jaffle_shop/target/
+examples/jaffle_shop/logs/
+examples/jaffle_shop/.user.yml

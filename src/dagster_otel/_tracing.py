@@ -24,13 +24,27 @@ Typing note: a generator function's declared return type must be `Generator[...]
 shaped (or a supertype), not a bare TypeVar -- both mypy and pyright enforce this,
 pyright more strictly (mypy accepts a `# type: ignore`; pyright's equivalent needs a
 separate, differently-named suppression, i.e. one silences a checker the other still
-flags). Rather than suppress either: overloading `traced()` itself doesn't work --
-mypy rejects it (`Overloaded function signature 2 will never be matched`), because
-`span_name` is identical across both overloads, so there's nothing at a `traced(...)`
-call site to disambiguate on. The decision only becomes knowable once the *returned*
-decorator is applied to an actual `func` -- one step later. So what's overloaded here
-is that returned decorator's `__call__`, via a `Protocol` (`_TracedDecorator` below),
-not `traced()`'s own signature.
+flags). Overloading `traced(span_name: str | None = ...)` itself on that split doesn't
+work -- mypy rejects it (`Overloaded function signature 2 will never be matched`),
+because `span_name` is identical across both overloads, so there's nothing at a
+`traced(...)` call site to disambiguate on. The decision only becomes knowable once
+the *returned* decorator is applied to an actual `func` -- one step later. So the
+generator-vs-plain-return split is overloaded on that returned decorator's `__call__`,
+via a `Protocol` (`_TracedDecorator` below), not `traced()`'s own signature.
+
+`traced()` itself is overloaded on a *different* axis: bare use (`@traced`, no
+parens -- matches `@op`/`@asset` themselves, which both support bare use; verified
+against real Dagster that `@op` alone, no call, works) vs. called use (`@traced()` or
+`@traced("name")`). Unlike the generator/plain-return split, this one *is* decidable
+at the `traced(...)` call site itself -- a bare `@traced` calls `traced(my_op)`,
+handing the wrapped function itself as the first positional argument, so `Callable`
+vs. `str | None` are genuinely different, non-overlapping argument types mypy can
+dispatch on. Confirmed (2026-09-16) that without this, bare `@traced` didn't raise
+anything -- it silently rebound the decorated name to the *unconfigured inner
+decorator function*, not the traced original, since `span_name` just receives the
+function object and `span_name or func.__name__` degrades into "the function is
+already truthy" territory downstream. A footgun worth a real fix, not a docs note,
+given `@op`/`@asset` train users to expect bare use directly above this decorator.
 """
 import inspect
 from collections.abc import Callable, Generator
@@ -158,21 +172,9 @@ def _traced_span(context: ExecutionContext, name: str) -> Generator[None, None, 
             dagster_builtin_log.removeFilter(log_filter)
 
 
-def traced(span_name: str | None = None) -> _TracedDecorator:
-    """Wraps a Dagster op/asset compute function in an OTel span.
-
-    Looks up the trace context published by publish_trace_context() (falling back up
-    to the run root, and across ancestor runs for retries) and activates it, so the
-    span opened here is a child of that trace even if this step is running in a
-    different process. If no trace context has been published (yet, or ever, for this
-    job), just opens an unparented span -- a normal state, not an error.
-
-    Also attaches a logging filter to context.log for the duration of the span, so any
-    context.log.* call made inside gets trace_id/span_id attributes forwarded to any
-    @logger you've configured (see _logging.py).
-
-    :param span_name: Span name. Defaults to the wrapped function's name.
-    """
+def _traced_decorator(span_name: str | None) -> _TracedDecorator:
+    """The actual `@traced(...)`-called-form decorator -- also what a bare `@traced`
+    reduces to underneath (with `span_name=None`), see `traced()` below."""
 
     def wrapper(func: Callable[..., Any]) -> Callable[..., Any]:
         name = span_name or func.__name__
@@ -194,3 +196,48 @@ def traced(span_name: str | None = None) -> _TracedDecorator:
         return inner
 
     return wrapper
+
+
+@overload
+def traced(
+    func: ComputeFn[C, P, Generator[Y, S, Rt]], /
+) -> ComputeFn[C, P, Generator[Y, S, Rt]]: ...
+@overload
+def traced(func: ComputeFn[C, P, R], /) -> ComputeFn[C, P, R]: ...
+@overload
+def traced(span_name: str | None = None) -> _TracedDecorator: ...
+def traced(span_name: Any = None) -> Any:
+    """Wraps a Dagster op/asset compute function in an OTel span.
+
+    Usable bare, like `@op`/`@asset` themselves:
+
+        @op(...)
+        @traced()
+        def my_op(context, x: int) -> int:
+            ...
+
+        @op(...)
+        @traced
+        def my_other_op(context) -> None:
+            ...
+
+    Looks up the trace context published by publish_trace_context() (falling back up
+    to the run root, and across ancestor runs for retries) and activates it, so the
+    span opened here is a child of that trace even if this step is running in a
+    different process. If no trace context has been published (yet, or ever, for this
+    job), just opens an unparented span -- a normal state, not an error.
+
+    Also attaches a logging filter to context.log for the duration of the span, so any
+    context.log.* call made inside gets trace_id/span_id attributes forwarded to any
+    @logger you've configured (see _logging.py).
+
+    :param span_name: Span name. Defaults to the wrapped function's name. Only
+        meaningful with the called form (`@traced()`/`@traced("name")`) -- with bare
+        `@traced`, this parameter instead receives the function being decorated (see
+        module docstring).
+    """
+    if span_name is None or isinstance(span_name, str):
+        return _traced_decorator(span_name)
+    # Bare `@traced` (no parens): span_name is actually the function itself.
+    func = span_name
+    return _traced_decorator(None)(func)

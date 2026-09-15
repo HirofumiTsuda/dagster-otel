@@ -530,6 +530,33 @@ different Dagster runs, two different processes, no shared memory -- correctly
 parented under `root_op`'s span from the original run. `retry_run.parent_run_id`
 matched the original run's ID exactly as `_run_id_and_ancestors` assumes.
 
+## Bare `@traced` support, matching `@op`/`@asset` (Issue #19, 2026-09-16)
+
+Confirmed `@op` (and `@asset`) support bare use with no parens (`@op` alone, not just
+`@op(...)`) -- verified directly, not assumed. `@traced()` stacks right underneath
+either, so a user reasonably might try `@traced` by analogy and, before this fix, hit
+a genuinely bad failure mode: no exception anywhere, just a silently wrong result.
+`@traced` bare is `my_op = traced(my_op)` -- `span_name` (the sole parameter) receives
+the function itself, and the `wrapper` function `traced()` returns became `my_op`'s
+new value directly, an *unconfigured decorator*, not the traced original function.
+
+Fixed by overloading `traced()` itself on a genuinely decidable axis: `Callable` (bare
+use) vs. `str | None` (called use) are non-overlapping argument types at the
+`traced(...)` call site itself -- unlike the generator/plain-return split (still
+resolved one level down, on the returned decorator's `__call__`, per the existing
+design; see `_tracing.py`'s module docstring for why that one can't be decided at
+`traced()`'s own call site). Implementation detail that cost real debugging time:
+mypy's overload-implementation compatibility check failed
+(`Overloaded function implementation does not accept all possible parameters of
+signature 1/2`) until the `func` parameter in the bare-use overloads was marked
+positional-only (`func: ComputeFn[C, P, R], /`) -- without it, mypy required the
+single implementation to also accept a `func=` keyword, which conflicts with the
+called-form overload's `span_name` keyword parameter occupying that same position.
+
+Verified against real Dagster + Jaeger: a `root_op`/`child_op` job with bare
+`@traced` (no parens) on both produces the identical correct trace shape (`child_op`
+`CHILD_OF` `root_op`) as the called form.
+
 ## Open questions
 
 None currently tracked -- multi-root/fan-in (#5), k8s_job_executor (#3), and

@@ -1,7 +1,8 @@
 """Tests for dagster_otel._tracing: the public @traced() decorator."""
 
+from conftest import FakeInstance, make_context
+
 from dagster_otel import traced
-from tests.conftest import FakeInstance, make_context
 
 
 def test_traced_preserves_plain_return_value() -> None:

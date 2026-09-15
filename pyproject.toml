@@ -31,6 +31,14 @@ dependencies = [
 test = [
     "pytest >= 7",
 ]
+# Pinned exactly (not >=), and installed the same way locally and in CI (`uv sync
+# --group lint`), so a version drift between the two can't silently pass locally and
+# fail in CI or vice versa -- the same problem dagster-prometheus-exporter's
+# .tool-versions file exists to avoid for golangci-lint/helm.
+lint = [
+    "mypy==2.3.1",
+    "pyright==1.1.414",
+]
 
 [project.urls]
 Home = "https://github.com/HirofumiTsuda/dagster-otel"
@@ -48,3 +56,9 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E", "F", "I"]
 ignore = []
+
+[tool.mypy]
+# Lets `mypy tests/` resolve `from conftest import ...` (tests/ has no __init__.py --
+# pytest's own import mechanism adds the test file's directory to sys.path at runtime,
+# which mypy doesn't do on its own; this is the static-checking equivalent).
+mypy_path = "tests"

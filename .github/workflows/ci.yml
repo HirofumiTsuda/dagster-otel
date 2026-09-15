@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.0.1
+
+      - run: uv sync --group test
+
+      - run: uv run pytest
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.0.1
+
+      # Not part of a dependency group (unlike mypy/pyright below): matches
+      # dagster-prometheus-exporter's own pattern of pinning ruff by version string
+      # directly in CI rather than adding it to the project's own dependencies.
+      - run: uvx ruff@0.16.7 check .
+
+      # mypy/pyright ARE pinned via [dependency-groups].lint in pyproject.toml (not
+      # ad-hoc `uvx <tool>@version` like ruff above) so the exact same pinned versions
+      # get used locally too via `uv sync --group lint` -- see that group's comment
+      # for why (the same local/CI version-drift problem .tool-versions exists to
+      # avoid for golangci-lint/helm).
+      - run: uv sync --group lint
+
+      - run: uv run mypy -p dagster_otel --explicit-package-bases
+      - run: uv run mypy --explicit-package-bases tests/
+
+      - run: uv run pyright .

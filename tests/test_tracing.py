@@ -14,6 +14,41 @@ def test_traced_preserves_plain_return_value() -> None:
     assert my_op(ctx, 21) == 42
 
 
+def test_traced_bare_preserves_plain_return_value() -> None:
+    """Bare @traced (no parens) -- must behave identically to @traced(), matching
+    @op/@asset's own bare-use support. Regression test for the silent-breakage bug
+    (Issue #19): bare use used to rebind the decorated name to the unconfigured inner
+    decorator function instead of the traced original, with no exception anywhere."""
+
+    @traced
+    def my_op(context, x: int) -> int:
+        return x * 2
+
+    ctx = make_context(FakeInstance(), "run-1", ["my_op"])
+    assert my_op(ctx, 21) == 42
+
+
+def test_traced_bare_preserves_generator_yields() -> None:
+    @traced
+    def my_asset(context):
+        yield "a"
+        yield "b"
+
+    ctx = make_context(FakeInstance(), "run-1", ["my_asset"])
+    assert list(my_asset(ctx)) == ["a", "b"]
+
+
+def test_traced_bare_default_span_name_is_function_name(spans) -> None:
+    @traced
+    def my_named_op(context) -> None:
+        pass
+
+    my_named_op(make_context(FakeInstance(), "run-1", ["my_named_op"]))
+
+    names = [s.name for s in spans.get_finished_spans()]
+    assert "my_named_op" in names
+
+
 def test_traced_preserves_generator_yields() -> None:
     """The case @dbt_assets needs -- see _tracing.py's module docstring for why this
     isn't just "the same as plain functions but with yield"."""

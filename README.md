@@ -33,6 +33,11 @@ def downstream_op(context, x: int) -> int:
 def downstream_asset(context) -> None:
     ...
 
+@op(...)
+@traced  # bare works too, like @op/@asset themselves -- same as @traced()
+def another_op(context) -> None:
+    ...
+
 @job(...)
 def my_job():
     downstream_op(upstream_op())

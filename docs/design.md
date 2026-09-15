@@ -276,6 +276,18 @@ def json_logger(init_context):
     return py_logger
 ```
 
+## Exception/error status is captured for free (verified 2026-09-15)
+
+`_traced_span` doesn't call `record_exception()`/`set_status()` anywhere, and never
+has -- but a failing op's span still shows up in Jaeger with `error=True`,
+`otel.status_code=ERROR`, an `otel.status_description` naming the exception, and a
+full `exception` event (type, message, stacktrace). Nothing to build: OTel Python's
+own `Tracer.start_as_current_span()` defaults to `record_exception=True` and
+`set_status_on_exception=True`, and this library has never overridden either.
+Confirmed directly against the Issue #4 retry-from-failure verification's Jaeger data
+-- `failing_op`'s first (deliberately failing) attempt carries exactly this, with no
+code in this library responsible for it.
+
 ## Sequencing: decorator-based now, auto-instrumentation later if it's ever needed
 
 This project deliberately ships the decorator-based (`@traced()`) design first, not a

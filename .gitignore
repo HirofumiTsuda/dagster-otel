@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.egg-info/
+build/
+dist/
+.venv/
+.python-version
+
+# Test / lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# env file
+.env
+
+# Private working log, not meant to be shared (see dagster-prometheus-exporter's
+# TODO.md for the same convention).
+TODO.md
+
+# Editor/IDE
+.vscode/
+
+# Claude Code: settings.json (shared) is committed; settings.local.json is a
+# per-user permission allowlist and isn't meant to be shared.
+.claude/settings.local.json

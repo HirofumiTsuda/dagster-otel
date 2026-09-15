@@ -1,0 +1,396 @@
+# Design
+
+**Status: design doc / early prototype. Not published yet.**
+
+This is the rationale, prior-art comparison, and decisions behind dagster-otel --
+what to read before changing the public API or the propagation/log-correlation
+mechanisms. See the top-level [README](../README.md) for what the project is and how
+to use it.
+
+## The gap this fills
+
+Dagster has no built-in OpenTelemetry support. Two long-standing, still-open upstream
+issues track this:
+
+- [dagster-io/dagster#11191](https://github.com/dagster-io/dagster/issues/11191) --
+  "Implement a default telemetry provider parallel to the default logger (OTel /
+  OpenTelemetry)" (opened 2022-12-16). The comment thread drifts into people wanting
+  Prometheus metrics specifically (see
+  [dagster-prometheus-exporter](https://github.com/HirofumiTsuda/dagster-prometheus-exporter),
+  a separate project of mine, for that). But it's also where the two pieces of prior
+  art below surfaced.
+- [dagster-io/dagster#12353](https://github.com/dagster-io/dagster/issues/12353) --
+  "Support for OpenTelemetry traces and span/trace ids in log lines" (opened
+  2023-02-15). Two asks in one issue: traces, and correlating trace/span IDs into log
+  lines. Both are in scope -- see below; the log correlation piece turned out to be
+  achievable without touching Dagster internals at all, via a public API nobody
+  building prior art here seems to have used.
+
+## Prior art, and why this project exists anyway
+
+| | Approach | Status | Gap |
+| --- | --- | --- | --- |
+| [bradlangel/dagster-opentelemetry](https://github.com/bradlangel/dagster-opentelemetry) | (none) | Empty. One commit, "Initial project structure and design document," README only, 0 stars/forks. Never implemented. | -- |
+| [Form-Energy/formenergy-observability](https://github.com/Form-Energy/formenergy-observability) | `@otel_op()` decorator that **replaces** `@op` (calls it internally); trace context propagated cross-process via Dagster's event log | Real, used in production at Form Energy for 3+ years, MIT licensed. Last commit 2023-11-21. | **No `@asset` support** (maintainer confirmed in [issue #1](https://github.com/Form-Energy/formenergy-observability/issues/1): "entrenched in ops," no plans to add it). The decorator also takes over the op definition itself -- see below. |
+| [aaaaahaaaaa's monkeypatch](https://github.com/dagster-io/dagster/issues/11191#issuecomment-1899092782) | Monkeypatches `OpDefinition.compute_fn` and `dagster._core.execution.api.job_execution_iterator` at process start; zero code changes to existing jobs | Prototype in an issue comment, not a package | Patches private Dagster internals ("no doubt this is highly discouraged by the Dagster team," per the author). Author's own finding: trace context only nests correctly under the `in_process` executor -- "I don't see any way to pass the OTPL context between processes." No solution for multiprocess/k8s. |
+
+None of the above address log/trace correlation (the other half of #12353) at all.
+
+Verified in this session (2026-09-15, against a from-scratch venv: Dagster 1.13.22,
+opentelemetry-sdk 1.44.0, local Jaeger with OTLP ingest):
+
+- formenergy-observability's core trick -- publish the trace context as
+  `AssetMaterialization` metadata, read it back via `context.instance.all_logs(...)`
+  -- still works unmodified, 3 years after its last commit, across genuinely separate
+  OS processes (`multiprocess` executor). aaaaahaaaaa's "no way to pass context between
+  processes" turns out to already have a solution; it's just in a different repo.
+- The same trick works for `@asset`, not just `@op`, with zero changes to the
+  propagation logic -- only the outer decorator needs to call `@asset(...)` instead of
+  `@op(...)`. This was expected once you know `@asset` wraps an `OpDefinition`
+  internally (same `op_handle`, same `context.instance`), not a surprise, but it means
+  the "no asset support" gap is a few lines of unwritten code, not a design limitation.
+
+So the trace-context-via-event-log mechanism is sound and already proven. What's worth
+rebuilding is the **decorator shape**.
+
+## Design decision: stack under `@op`/`@asset`, don't replace it
+
+formenergy-observability's `@otel_op()` owns the op definition:
+
+```python
+@otel_op()   # this calls @op(...) internally -- otel_op *is* the op decorator
+def my_op(context):
+    ...
+```
+
+To trace an op you already have, you replace its `@op` with `@otel_op()` -- meaning
+the library, not Dagster, decides what makes this function an op. That's an awkward
+place for a tracing library to sit.
+
+Instead, `dagster-otel` provides a plain function decorator meant to stack **under**
+Dagster's own `@op`/`@asset`, which keeps full, unmodified ownership of the op/asset
+definition:
+
+```python
+from dagster_otel import traced
+
+@op(...)          # Dagster's own decorator owns op-ness, unchanged
+@traced()         # thin layer added underneath, does nothing Dagster-specific
+def my_op(context, upstream: str) -> str:
+    ...
+```
+
+Verified in this session: this composition preserves Dagster's type inference through
+the wrapper (`functools.wraps` sets `__wrapped__`, which `inspect.signature()` follows
+by default -- confirmed via `STEP_INPUT ... Type check passed` in the run log, not just
+assumed), works for both `@op` and `@asset`, and produces correctly-nested cross-process
+spans in Jaeger identically to formenergy-observability's op-owning version.
+
+## Design decision: no monkeypatching
+
+Rejected, even though it's the only approach that needs zero decorators on existing
+code. Reasons:
+
+- It patches private, undocumented Dagster internals
+  (`dagster._core.execution.api.job_execution_iterator`, `OpDefinition.compute_fn`),
+  which are far less stable than even Dagster's GraphQL API (see the compatibility
+  notes in [dagster-prometheus-exporter](https://github.com/HirofumiTsuda/dagster-prometheus-exporter#compatibility)
+  for how much GraphQL itself already shifts between versions).
+- Its own author calls it "highly discouraged by the Dagster team" and "use at your
+  own risk."
+- It uses `unittest.mock.patch` in production code, not a test.
+- It doesn't solve cross-process propagation on its own -- combining it with the
+  event-log trick would still be needed, at which point the only thing monkeypatching
+  buys is "no decorator on each function," at the cost of an entire extra fragility
+  axis.
+
+The "no decorator on existing code" convenience monkeypatching offers is real, but
+`opentelemetry-instrument`-style zero-code auto-instrumentation is a specific,
+recognized OTel pattern (implemented via `BaseInstrumentor` + an
+`opentelemetry_instrumentor` entry point) that this project is deliberately not
+attempting -- which is also why this package is **not** named
+`opentelemetry-instrumentation-dagster`; that name implies exactly the zero-code
+contract this project opts out of.
+
+One concrete consequence, checked against
+[opentelemetry-python-contrib's CONTRIBUTING.md](https://github.com/open-telemetry/opentelemetry-python-contrib/blob/main/CONTRIBUTING.md):
+new instrumentation packages there are required to extend `BaseInstrumentor` and
+support auto-instrumentation via entry points. So this design can never be merged into
+the official contrib monorepo, regardless of license -- it's a structural mismatch, not
+a licensing one. (The much lower-bar [OTel ecosystem registry](https://opentelemetry.io/ecosystem/registry/),
+by contrast, lists projects under any license, MIT included, and isn't gated on the
+`BaseInstrumentor` pattern. That's the realistic path to any official-ish visibility,
+independent of license choice -- see [License](#license) below.)
+
+## Log/trace correlation, via a public API
+
+`context.log` (`DagsterLogManager`) is, concretely, a subclass of Python's standard
+`logging.Logger` (`class DagsterLogManager(logging.Logger)`, see
+`dagster/_core/log_manager.py`). That means every ordinary `logging` extension point
+works on it, including `Logger.addFilter()` -- the standard library's own documented
+mechanism for attaching contextual data to log records
+([logging cookbook](https://docs.python.org/3/howto/logging-cookbook.html#using-filters-to-impart-contextual-information)).
+
+Verified in this session: attaching a `logging.Filter` to `context.log` that stamps
+`record.trace_id`/`record.span_id` from the currently-active OTel span, then calling
+`context.log.info(...)`, produces exactly what you'd want:
+
+```
+CAPTURED msg='...hello from inside a span' extra={'trace_id': 'b87390af...', 'span_id': '64065b93...', 'dagster_meta': {...}}
+CAPTURED msg='...hello after span exited'  extra={'dagster_meta': {...}}   # no trace_id/span_id -- correctly out of scope
+```
+
+Two things confirmed, not assumed: the ids only appear on records logged while the
+span is active (scoping is correct, not a global stamp); and they survive all the way
+through Dagster's own `DagsterLogHandler` into a **user-defined `@logger`** (Dagster's
+own documented custom-logging extension point) via its existing `extra={...}`
+forwarding (`DagsterLogHandler._extract_extra`) -- i.e. this reaches actual log output,
+not just something internal to this library. A user-defined `@logger` that formats
+`record.trace_id`/`record.span_id` (e.g. into JSON) gets real log/trace correlation,
+entirely through public `logging` and Dagster APIs. No Dagster internals touched.
+
+`traced()` will attach this filter automatically at span-start, so this happens for
+free wherever `@traced()` is used -- no separate opt-in.
+
+**Scope check, since it's easy to overstate this:** this only covers `context.log`
+calls made during an op/asset step -- i.e. only what `@traced()` wraps. It does
+**not** reach the Dagster daemon's own operational logs (scheduler/sensor tick
+evaluation, heartbeats). Checked directly in `dagster/_daemon/daemon.py`:
+`self._logger = get_default_daemon_logger(...)` resolves to a plain
+`logging.getLogger(f"dagster.daemon.{name}")` -- a completely separate logger from
+`DagsterLogManager`, with no `context` (a daemon tick isn't scoped to a run the way a
+step is). So this doesn't answer requests like
+[dagster-io/dagster#12495](https://github.com/dagster-io/dagster/discussions/12495)'s
+`tha23rd`/`dorothychen` comments wanting daemon logs shipped to Datadog as JSON --
+that's a shipping/formatting problem a log agent (Fluentd, Vector, etc.) already
+solves for arbitrary process output, independent of anything this library does. What
+this library actually adds is narrower and different in kind: embedding trace/span IDs
+*into* the content of op/asset log lines specifically, which a log shipper can't do on
+its own since it doesn't know about the active OTel span.
+
+## Design decision: run tags, not `AssetMaterialization` events, as the transport
+
+formenergy-observability (and this project's first working version) published the
+trace context as `AssetMaterialization` event metadata. Verified directly (2026-09-15,
+against the `dagster_otel_selftest` fixture): doing this registers the bookkeeping
+`asset_key` (`__dagster_otel_root__`, or a subgraph path) in Dagster's **real asset
+catalog** --
+
+```python
+instance.all_asset_keys()
+# -> [AssetKey(['__dagster_otel_root__'])]   # for a job using ZERO real @assets
+```
+
+-- a fake entry shows up in the Dagster UI's asset list next to real data assets, even
+for `@op`-only jobs with no assets at all. Not cosmetic-and-ignorable: the asset
+catalog is what `dagster-prometheus-exporter` (this author's other project) and anyone
+else scraping asset health metadata reads from; polluting it with internal bookkeeping
+is a real correctness problem for downstream consumers, not just visual noise.
+
+Switched the transport to Dagster **run tags** instead
+(`instance.add_run_tags(run_id, {key: json_string})` / `run.tags`): same run-storage
+database, same cross-process readability (verified: a freshly-opened `DagsterInstance`
+sees a tag added by another), but tags are a flat string-to-string map on the run
+itself -- nothing asset-shaped, nothing that touches `instance.all_asset_keys()`
+(re-verified empty after the switch, both for an op-only run and an asset run that
+correctly shows only the *real* assets, `root_asset`/`child_asset`, nothing extra).
+
+Bonus: this deleted the whole "narrow a ~26-member `DagsterEvent.event_specific_data`
+union down to the one variant with a `.materialization` attribute, then narrow
+`MetadataValue` down to `JsonMetadataValue`" dance that `_find_trace_context` needed
+for `AssetMaterialization` (event-log entries are typed as a broad union across every
+DagsterEvent kind; run tags are just `Mapping[str, str]`, no union narrowing needed at
+all). Simpler and avoids the pollution -- no tradeoff either way, once run tags turned
+out to work.
+
+## Non-goals
+
+- **Zero-code instrumentation.** See above -- this is `@traced()` on the functions you
+  want traced, not automatic.
+- **Metrics.** [dagster-prometheus-exporter](https://github.com/HirofumiTsuda/dagster-prometheus-exporter)
+  already covers Dagster metrics via Prometheus. This project is traces only.
+
+## API (implemented, self-tested -- see docs/design.md's verification notes above)
+
+```python
+from dagster_otel import traced
+
+@op(...)
+@traced()  # the first @traced() step to run in a run becomes its root automatically
+def upstream_op(context) -> int:
+    ...
+
+@op(...)
+@traced()  # picks up the published context automatically; no context lookup by hand
+def downstream_op(context, x: int) -> int:
+    ...
+
+@asset(...)
+@traced()  # identical decorator, works for assets too
+def downstream_asset(context) -> None:
+    ...
+```
+
+No `configure()` call, no `@resource`, no `required_resource_keys` -- `@traced()`
+calls `configure()` itself (idempotently, see `_setup.py`) the first time it runs in a
+process. `publish_trace_context` is still exported for cases `@traced()`'s auto-root
+detection doesn't cover (e.g. deliberately marking a specific subgraph boundary), and
+`configure()` is still exported for configuring eagerly rather than on first use, but
+neither is required for ordinary use -- see
+"Resolved: `@traced()` now handles the root case itself" above and "Design decision:
+`@traced()` self-configures" below.
+
+`configure()` honors the standard `OTEL_EXPORTER_OTLP_*` and `OTEL_SERVICE_NAME` env
+vars rather than inventing bespoke config (formenergy-observability requires its own
+`OTEL_EXPORTER_OTLP_HEADERS_JSON` env var for this; not repeating that here).
+
+`@traced()` attaches the trace-context logging filter (see above) to `context.log` for
+the duration of its span, so `record.trace_id`/`record.span_id` are available to any
+`@logger` you define, e.g.:
+
+```python
+@logger
+def json_logger(init_context):
+    py_logger = logging.getLogger("my_pipeline")
+    py_logger.addHandler(JsonFormattingHandler())  # reads record.trace_id/span_id
+    return py_logger
+```
+
+## Sequencing: decorator-based now, auto-instrumentation later if it's ever needed
+
+This project deliberately ships the decorator-based (`@traced()`) design first, not a
+`BaseInstrumentor`-based auto-instrumentation package, even though only the latter
+could ever be accepted into `opentelemetry-python-contrib` (see above -- that's a
+structural requirement, unrelated to license).
+
+Reasoning, worked through in the design chat: getting into the official contrib repo
+is not itself the goal here -- a working, safe tracing story for this project's own
+Dagster pipelines is. Auto-instrumentation would mean building essentially
+aaaaahaaaaa's monkeypatch prototype (patching `OpDefinition.compute_fn` and
+`dagster._core.execution.api.job_execution_iterator`) into a proper package, which
+reopens every fragility concern already rejected in "Design decision: no
+monkeypatching" above -- undocumented internals, no official support, an entire extra
+package to keep working across Dagster versions. Note this is a separate *package*
+patching Dagster from the outside at runtime, not a change to dagster-io/dagster's own
+repo -- OTel's other instrumentation packages (`opentelemetry-instrumentation-flask`
+etc.) don't touch Flask's source either, they patch it at process start from outside.
+
+So: ship `dagster-otel` (this design) first, and only build a monkeypatch-based
+auto-instrumentation package later, as a deliberate, separate, explicitly-riskier
+addition, if there's ever an actual reason to want contrib listing or zero-code use
+specifically (e.g. tracing jobs whose source isn't ours to edit). Not a default
+follow-up step -- a decision to make again, with its own justification, if it comes up.
+
+## Resolved: `@traced()` now handles the root case itself
+
+`publish_trace_context` no longer needs a manually-written root step. `traced()`
+calls `_find_trace_context` itself; when it finds nothing (the first `@traced()` step
+to run in this run), it now auto-publishes for you (2026-09-15). So the common case is
+just `@traced()` on every op/asset, including what would be "the root" -- no special
+code path for it. `publish_trace_context` stays exported for advanced cases (manually
+marking a subgraph boundary, etc.), but isn't required for ordinary use. This also
+resolves the "root doesn't get the logging filter" gap noted earlier: the root's own
+`@traced()` call installs the filter the same as every other step's.
+
+## Design decision: `@traced()` self-configures, no `@resource` required (2026-09-15)
+
+Raised in the design chat: needing `configure(service_name=...)` wired through a
+`@resource` plus `required_resource_keys={"observability"}` on *every single* traced
+op/asset, just to get a `TracerProvider` set up, is real boilerplate for what
+`configure()` actually does (call `trace.set_tracer_provider()` once per process).
+
+Fix: `_traced_span` calls `configure()` itself, before doing anything else. Safe
+because `configure()` is already idempotent (see its docstring) -- if a `@resource` or
+an earlier `@traced()` step in this same process already called it, this call is a
+no-op; if nothing has, it configures from env vars via `Resource.create()`, which
+(verified, unlike the plain `Resource(attributes=...)` constructor this project's
+`configure()` used previously) reads `OTEL_SERVICE_NAME` automatically and adds
+standard attributes for free (`telemetry.sdk.*`, `service.instance.id`).
+
+Verified end-to-end (`no_resource_test` fixture): a job with **zero** `@resource`,
+`required_resource_keys`, or `configure()` call anywhere, run with only
+`OTEL_SERVICE_NAME`/`OTEL_EXPORTER_OTLP_ENDPOINT` set as env vars, produces a correctly
+nested trace in Jaeger under the expected service name.
+
+`configure()` takes **no arguments** -- also raised in the design chat, and correct:
+its only caller (`_traced_span`) never had a Python-level value to pass in the first
+place, so a `service_name`/`otlp_endpoint` parameter surface would exist for literally
+nobody. Set `OTEL_SERVICE_NAME` / `OTEL_EXPORTER_OTLP_ENDPOINT` instead -- consistent
+with this module's actual policy (defer to env vars, don't build a parallel config
+surface) rather than in tension with it. `configure()` stays exported for the one
+remaining real case: calling it eagerly (e.g. from a `@resource`) if you want
+configuration to happen before any step runs rather than lazily on first `@traced()`
+use.
+
+**Side effect of making this automatic, caught and fixed the same day**: with no
+working OTLP endpoint configured at all, `SimpleSpanProcessor`'s synchronous,
+in-line export retries (`_MAX_RETRYS = 6`, exponential backoff) blocked **every single
+`@traced()` step for ~7 seconds** before giving up -- confirmed by pointing
+`OTEL_EXPORTER_OTLP_ENDPOINT` at a closed port and watching `STEP_SUCCESS` durations
+jump from ~100ms to ~7s. Not a hang (`RUN_SUCCESS` still happens), but "forgot to stand
+up a collector" silently turning into "the whole pipeline is now several seconds
+slower per step" is a bad failure mode for something meant to be safe to just add.
+Fixed with a 2-second default `timeout` on `OTLPSpanExporter`
+(`_DEFAULT_OTLP_TIMEOUT_SECONDS` in `_setup.py`), applied **only** when the caller
+hasn't set `OTEL_EXPORTER_OTLP_TRACES_TIMEOUT`/`OTEL_EXPORTER_OTLP_TIMEOUT` themselves
+-- an explicit env var is still honored over this project's own default, same policy as
+everywhere else. Reverified with the same unreachable-endpoint setup: ~1.2s per step
+instead of ~7s.
+
+## Known limitation: multi-root and fan-in graphs get the right trace, not always the right shape
+
+Confirmed by direct testing (2026-09-15), not just reasoned through:
+
+**Multiple independent roots** (two steps with no dependency between them, e.g.
+`root_a` and `root_b` in the same job) race on `ROOT_TRACE_KEY`: whichever one's
+published context happens to be visible first when the other looks wins, and the
+loser's branch attaches to the *wrong* root. Reproduced against this repo,
+**and against Form-Energy's original `formenergy-observability`** (same
+`SpanName.ROOT`-keyed design) -- not a bug this reimplementation introduced, a limit
+inherited from the prior art, apparently never noticed across 3+ years of use there.
+
+Fix applied: every step that finds no real parent now seeds its span's `trace_id`
+*deterministically from `context.run_id`* (`_seed_run_root_context`, SHA-256 of the
+run ID truncated to 128 bits) instead of letting a fresh span generate a random one.
+Verified: `root_a` and `root_b` now land in the *same trace* even when the race still
+happens -- no more silent disappearance into a disconnected trace. What's **not**
+fixed: which of the two becomes the OTel parent of a given downstream step is still
+arbitrary (confirmed: in one run `child_a` ended up parented under `root_b`, not
+`root_a`). The blast radius of the original bug (wrong trace entirely) is bounded; the
+cosmetic issue (wrong sibling as parent) remains.
+
+**Fan-in** (one step depending on outputs from more than one independently-traced
+upstream, e.g. `merge_op(root_a(), root_b())`) has the same root cause and isn't fixed
+by the above: OTel spans have exactly one parent, and `_find_trace_context` only ever
+returns one context. Confirmed: `merge_op`'s span attached to whichever of `root_a`/
+`root_b` its lookup happened to find, with **no trace-level indication it also depends
+on the other one at all** (though, same fix, both end up in the shared trace_id).
+
+Properly fixing either case needs the same missing piece: knowing a step's *actual*
+upstream step(s) from Dagster's real dependency graph, not the subgraph-path
+approximation `_trace_key_for` currently uses. OTel's `Link` mechanism (used by
+formenergy-observability's `ContextAwareTracer.start_new_linked_trace` for a related
+purpose) is the right primitive for fan-in once that graph is available -- attach a
+`Link` to every real upstream context, not just the one picked as parent. Getting the
+real dependency graph out of `context` (Dagster does expose step input/upstream-output
+info, but it's deeper internal-API surface than anything used so far) is unexplored;
+tracked here rather than attempted under time pressure.
+
+## Open questions
+
+- k8s_job_executor: the propagation mechanism should work identically in principle
+  (`context.instance` is the same abstraction regardless of node), reasoned through in
+  the design chat but **not yet verified against an actual multi-node cluster**. Needs
+  a kind cluster + k8s_job_executor before claiming this works, not just "should work."
+- Retry-from-failure (`_run_id_and_ancestors` walking `parent_run_id`): ported from
+  formenergy-observability's approach but not yet exercised against an actual
+  retried/re-executed run in this repo.
+
+## License
+
+MIT -- matches [dagster-prometheus-exporter](https://github.com/HirofumiTsuda/dagster-prometheus-exporter)
+(my other Dagster project) and formenergy-observability (which this design builds on
+ideas from, not copied code -- see [attribution](#prior-art-and-why-this-project-exists-anyway)
+above). Originally set to Apache-2.0 on the assumption that might matter for eventual
+upstreaming into opentelemetry-python-contrib; turned out not to (see above), so no
+reason to diverge from MIT.

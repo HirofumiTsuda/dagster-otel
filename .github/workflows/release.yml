@@ -1,0 +1,41 @@
+name: Release
+
+# Triggered by pushing a version tag (vX.Y.Z), not on every push to main -- publishing
+# to PyPI is a one-way action (a version, once uploaded, can be yanked but never fully
+# deleted/reused), so it's a deliberate, separate step from CI, not automatic.
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.0.1
+
+      - run: uv build
+
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      # No stored API token -- PyPI trusted publishing (OIDC) instead, configured on
+      # pypi.org against this repo + this workflow file + the "pypi" environment name
+      # above (see dev/kubernetes/README.md-style docs/design.md note, if one gets
+      # added, for the exact setup steps).
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@v1.14.2

@@ -35,7 +35,12 @@ jobs:
       # get used locally too via `uv sync --group lint` -- see that group's comment
       # for why (the same local/CI version-drift problem .tool-versions exists to
       # avoid for golangci-lint/helm).
-      - run: uv sync --group lint
+      #
+      # Both groups, not just lint: mypy checking tests/ needs pytest importable too
+      # (conftest.py does `import pytest`) -- caught by this exact job failing on the
+      # PR that introduced it, since the two jobs run as separate, isolated runners
+      # and this one alone never installs the test group otherwise.
+      - run: uv sync --group lint --group test
 
       - run: uv run mypy -p dagster_otel --explicit-package-bases
       - run: uv run mypy --explicit-package-bases tests/

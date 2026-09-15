@@ -5,9 +5,7 @@ your own log lines -- without giving up ownership of your op/asset definitions t
 third-party decorator, and without monkeypatching Dagster internals.
 
 **Status: early prototype, self-tested locally against real Dagster runs + a real
-trace backend. Not published to PyPI yet. Known limitation: multi-root and fan-in
-graphs land in the right trace but not always with the right parent -- see
-[docs/design.md](docs/design.md#known-limitation-multi-root-and-fan-in-graphs-get-the-right-trace-not-always-the-right-shape).**
+trace backend. Not published to PyPI yet.**
 
 ```python
 from dagster import asset, job, op

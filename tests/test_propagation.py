@@ -1,73 +1,147 @@
 """Tests for dagster_otel._propagation: the run-tags-based cross-process trace context
-transport, and the key scheme _find_trace_context/_trace_key_for use to fall back from
-a step's own subgraph up to the run root."""
+transport, keyed by each step's own real dependency graph (see the module's docstring,
+"Keyed by real step dependencies, not subgraph path", for why -- subgraph-path keying
+let two independent roots collide)."""
 
 from conftest import FakeInstance, make_context
 from opentelemetry import trace
+from opentelemetry.trace import Link
 
 from dagster_otel._propagation import (
-    ROOT_TRACE_KEY,
-    _find_trace_context,
+    _own_step_key,
     _run_id_and_ancestors,
     _seed_run_root_context,
-    _trace_key_for,
+    _upstream_step_keys,
+    carrier_to_span_context,
+    find_upstream_trace_contexts,
     publish_trace_context,
 )
 
 
-def test_trace_key_for_top_level_op_is_root() -> None:
-    ctx = make_context(FakeInstance(), "run-1", ["my_op"])
-    assert _trace_key_for(ctx) == ROOT_TRACE_KEY
-
-
-def test_trace_key_for_nested_op_is_enclosing_subgraph_path() -> None:
+def test_own_step_key_is_dotted_op_path() -> None:
     ctx = make_context(FakeInstance(), "run-1", ["outer", "inner", "my_op"])
-    assert _trace_key_for(ctx) == "outer.inner"
+    assert _own_step_key(ctx) == "outer.inner.my_op"
 
 
-def test_find_trace_context_prefix_order_nearest_first() -> None:
-    """A step nested three levels deep should check its immediate subgraph first,
-    then progressively shallower ones, then the run root last."""
+def test_upstream_step_keys_empty_for_no_deps() -> None:
+    ctx = make_context(FakeInstance(), "run-1", ["root_op"])
+    assert _upstream_step_keys(ctx) == frozenset()
+
+
+def test_upstream_step_keys_reflects_real_dependencies() -> None:
+    ctx = make_context(FakeInstance(), "run-1", ["merge_op"], deps=["root_a", "root_b"])
+    assert _upstream_step_keys(ctx) == frozenset({"root_a", "root_b"})
+
+
+def test_find_upstream_trace_contexts_empty_for_root() -> None:
+    ctx = make_context(FakeInstance(), "run-1", ["root_op"])
+    assert find_upstream_trace_contexts(ctx) == []
+
+
+def test_find_upstream_trace_contexts_empty_when_upstream_untraced() -> None:
+    """A real dependency that never called publish_trace_context() (not @traced(), or
+    -- shouldn't happen given Dagster's own execution order -- not yet run) simply
+    isn't found; this is a normal state; not an error."""
+    ctx = make_context(FakeInstance(), "run-1", ["child_op"], deps=["untraced_root"])
+    assert find_upstream_trace_contexts(ctx) == []
+
+
+def test_find_upstream_trace_contexts_finds_real_parent() -> None:
     instance = FakeInstance()
-    # Publish under the *outermost* subgraph key ("a") only.
-    publisher_ctx = make_context(instance, "run-1", ["a", "unrelated_op"])
+    root_ctx = make_context(instance, "run-1", ["root_op"])
     with trace.get_tracer("test").start_as_current_span("root"):
-        publish_trace_context(publisher_ctx)
+        publish_trace_context(root_ctx)
+        root_trace_id = trace.get_current_span().get_span_context().trace_id
 
-    # A step nested at a.b.c.my_op should still find the "a"-level publish, by
-    # falling all the way back through "a.b.c" -> "a.b" -> "a".
-    deep_ctx = make_context(instance, "run-1", ["a", "b", "c", "my_op"])
-    found = _find_trace_context(deep_ctx)
-    assert found is not None
+    child_ctx = make_context(instance, "run-1", ["child_op"], deps=["root_op"])
+    found = find_upstream_trace_contexts(child_ctx)
+    assert len(found) == 1
+    # traceparent carrier format: "00-<trace_id hex>-<span_id hex>-<flags>"
+    assert format(root_trace_id, "032x") in found[0]["traceparent"]
 
 
-def test_find_trace_context_prefers_nearest_match() -> None:
-    """If both an outer and a nearer subgraph published, the nearer one wins."""
+def test_find_upstream_trace_contexts_ignores_unrelated_publishers() -> None:
+    """Two independent roots must not collide just because they published in the same
+    run -- the bug this whole redesign (Issue #5) exists to fix. Each key is now the
+    step's own identity, not a shared subgraph key, so there's nothing to collide on."""
     instance = FakeInstance()
 
-    outer_ctx = make_context(instance, "run-1", ["a", "outer_publisher"])
-    with trace.get_tracer("test").start_as_current_span("outer"):
-        publish_trace_context(outer_ctx)
-        outer_trace_id = trace.get_current_span().get_span_context().trace_id
+    root_a_ctx = make_context(instance, "run-1", ["root_a"])
+    with trace.get_tracer("test").start_as_current_span("root_a"):
+        publish_trace_context(root_a_ctx)
+        trace_id_a = trace.get_current_span().get_span_context().trace_id
 
-    inner_ctx = make_context(instance, "run-1", ["a", "b", "inner_publisher"])
-    with trace.get_tracer("test").start_as_current_span("inner"):
-        publish_trace_context(inner_ctx)
-        inner_trace_id = trace.get_current_span().get_span_context().trace_id
+    root_b_ctx = make_context(instance, "run-1", ["root_b"])
+    with trace.get_tracer("test").start_as_current_span("root_b"):
+        publish_trace_context(root_b_ctx)
 
-    assert outer_trace_id != inner_trace_id  # sanity: two genuinely different spans
+    assert trace_id_a != trace.get_current_span().get_span_context().trace_id
 
-    child_ctx = make_context(instance, "run-1", ["a", "b", "my_op"])
-    found = _find_trace_context(child_ctx)
-    assert found is not None
-    # traceparent carrier format: "00-<trace_id hex>-<span_id hex>-<flags>"
-    assert format(inner_trace_id, "032x") in found["traceparent"]
-    assert format(outer_trace_id, "032x") not in found["traceparent"]
+    # child_a depends only on root_a -- must find exactly root_a's context, never
+    # root_b's, regardless of which published first or second.
+    child_a_ctx = make_context(instance, "run-1", ["child_a"], deps=["root_a"])
+    found = find_upstream_trace_contexts(child_a_ctx)
+    assert len(found) == 1
+    assert format(trace_id_a, "032x") in found[0]["traceparent"]
 
 
-def test_find_trace_context_none_when_nothing_published() -> None:
-    ctx = make_context(FakeInstance(), "run-1", ["my_op"])
-    assert _find_trace_context(ctx) is None
+def test_find_upstream_trace_contexts_fan_in_returns_all_in_sorted_order() -> None:
+    """A step depending on two published upstreams gets both back, ordered
+    deterministically by step_key -- _tracing.py relies on this order to pick a
+    stable primary parent (first) vs. Link candidates (rest)."""
+    instance = FakeInstance()
+
+    root_b_ctx = make_context(instance, "run-1", ["root_b"])
+    with trace.get_tracer("test").start_as_current_span("root_b"):
+        publish_trace_context(root_b_ctx)
+        trace_id_b = trace.get_current_span().get_span_context().trace_id
+
+    root_a_ctx = make_context(instance, "run-1", ["root_a"])
+    with trace.get_tracer("test").start_as_current_span("root_a"):
+        publish_trace_context(root_a_ctx)
+        trace_id_a = trace.get_current_span().get_span_context().trace_id
+
+    merge_ctx = make_context(instance, "run-1", ["merge_op"], deps=["root_a", "root_b"])
+    found = find_upstream_trace_contexts(merge_ctx)
+    assert len(found) == 2
+    # "root_a" sorts before "root_b" -- primary parent is deterministic even though
+    # root_b was published first.
+    assert format(trace_id_a, "032x") in found[0]["traceparent"]
+    assert format(trace_id_b, "032x") in found[1]["traceparent"]
+
+
+def test_find_upstream_trace_contexts_fan_in_partial_publish() -> None:
+    """If only one of two real upstreams published (the other untraced), just that
+    one comes back -- not an error, not padded with a placeholder."""
+    instance = FakeInstance()
+
+    root_a_ctx = make_context(instance, "run-1", ["root_a"])
+    with trace.get_tracer("test").start_as_current_span("root_a"):
+        publish_trace_context(root_a_ctx)
+
+    merge_ctx = make_context(
+        instance, "run-1", ["merge_op"], deps=["root_a", "untraced_root_b"]
+    )
+    found = find_upstream_trace_contexts(merge_ctx)
+    assert len(found) == 1
+
+
+def test_carrier_to_span_context_recovers_published_span() -> None:
+    instance = FakeInstance()
+    ctx = make_context(instance, "run-1", ["root_op"])
+    with trace.get_tracer("test").start_as_current_span("root"):
+        publish_trace_context(ctx)
+        expected = trace.get_current_span().get_span_context()
+
+    found = find_upstream_trace_contexts(
+        make_context(instance, "run-1", ["child_op"], deps=["root_op"])
+    )
+    span_context = carrier_to_span_context(found[0])
+    assert span_context.trace_id == expected.trace_id
+    assert span_context.span_id == expected.span_id
+    # Also usable to build a Link, which is the actual reason this exists
+    # (fan-in's non-primary upstreams -- see _tracing.py).
+    Link(span_context)
 
 
 def test_publish_requires_an_active_span() -> None:
@@ -95,9 +169,9 @@ def test_run_id_and_ancestors_single_run_has_no_ancestors() -> None:
     assert _run_id_and_ancestors(ctx) == ["run-1"]
 
 
-def test_find_trace_context_falls_back_to_ancestor_run() -> None:
+def test_find_upstream_trace_contexts_falls_back_to_ancestor_run() -> None:
     """A retried run that doesn't re-run the publishing step should still find the
-    trace context published in the original (parent) run."""
+    trace context published by that step in the original (parent) run."""
     instance = FakeInstance()
     instance.create_run("original")
     instance.create_run("retry", parent_run_id="original")
@@ -107,8 +181,8 @@ def test_find_trace_context_falls_back_to_ancestor_run() -> None:
         publish_trace_context(publisher_ctx)
 
     # This step only exists in the retry run, which never published anything itself.
-    retry_ctx = make_context(instance, "retry", ["child_op"])
-    assert _find_trace_context(retry_ctx) is not None
+    retry_ctx = make_context(instance, "retry", ["child_op"], deps=["root_op"])
+    assert len(find_upstream_trace_contexts(retry_ctx)) == 1
 
 
 def test_seed_run_root_context_is_deterministic_per_run() -> None:

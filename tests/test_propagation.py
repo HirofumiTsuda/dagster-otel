@@ -2,6 +2,7 @@
 transport, and the key scheme _find_trace_context/_trace_key_for use to fall back from
 a step's own subgraph up to the run root."""
 
+from conftest import FakeInstance, make_context
 from opentelemetry import trace
 
 from dagster_otel._propagation import (
@@ -12,7 +13,6 @@ from dagster_otel._propagation import (
     _trace_key_for,
     publish_trace_context,
 )
-from tests.conftest import FakeInstance, make_context
 
 
 def test_trace_key_for_top_level_op_is_root() -> None:

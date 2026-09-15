@@ -456,12 +456,49 @@ against real Dagster behavior generally) matters beyond "more test coverage": ea
 these fixes came from behavior no amount of *unit* testing this library's own code in
 isolation would have surfaced.
 
+## Verified against a real `k8s_job_executor` cluster (Issue #3, 2026-09-15)
+
+Confirmed by direct testing, not just reasoning that `context.instance` is the same
+abstraction regardless of node: a `kind` cluster (single node), Postgres-backed run
+storage/event log/schedule storage (`fs_io_manager`'s default local-disk storage also
+needed a shared PVC -- unrelated to this library, just a prerequisite for
+`k8s_job_executor` to run a job to completion at all, since each step gets a fresh
+container with no filesystem of its own), an in-cluster Jaeger, and the multi-root +
+fan-in op graph from the Issue #5 verification (`root_a`/`root_b` independent,
+`child_a`/`child_b` each depending on one, `merge_op` depending on both), run with
+`@job(executor_def=k8s_job_executor)`.
+
+`kubectl get pods` confirmed each of the 5 ops ran in its own separate Kubernetes Job/
+pod (`dagster-step-<hash>`, not just separate OS processes on one host as
+`multiprocess` gives). Jaeger showed the identical, correct trace shape as the
+multiprocess verification, now across real pods:
+
+```
+root_a     CHILD_OF 0000000000000001        (deterministic-seed root)
+root_b     CHILD_OF 0000000000000001
+child_a    CHILD_OF root_a
+child_b    CHILD_OF root_b
+merge_op   CHILD_OF root_a, FOLLOWS_FROM root_b
+```
+
+Confirms all three things Issue #3 asked about: trace context published by one step's
+pod is found by a downstream step's pod (via `context.instance` -- Postgres run
+storage, reachable identically from any pod); Jaeger shows correctly nested spans (and
+correct fan-in `Link`s) across pods, not just processes; and the deterministic
+multi-root `trace_id` fallback (`_seed_run_root_context`) computes the identical
+`trace_id` independently in each pod's own process, same as across multiprocess's
+separate host processes -- confirmed by `root_a`/`root_b` landing in the same trace
+despite running in unrelated pods with no shared memory.
+
+Setup is preserved under `dev/kubernetes/` (see its own README for exact repro
+commands) rather than only in a scratch directory -- not wired into CI (a full `kind`
+cluster spin-up per-PR is heavy for a one-off verification, unlike
+`dagster-prometheus-exporter`'s scheduled kind e2e test, which guards a chart/exporter
+against its own regressions), but rerunnable by hand if `dagster`/`dagster-k8s`/
+`dagster-postgres` get bumped and this needs reconfirming.
+
 ## Open questions
 
-- k8s_job_executor: the propagation mechanism should work identically in principle
-  (`context.instance` is the same abstraction regardless of node), reasoned through in
-  the design chat but **not yet verified against an actual multi-node cluster**. Needs
-  a kind cluster + k8s_job_executor before claiming this works, not just "should work."
 - Retry-from-failure (`_run_id_and_ancestors` walking `parent_run_id`): ported from
   formenergy-observability's approach but not yet exercised against an actual
   retried/re-executed run in this repo.

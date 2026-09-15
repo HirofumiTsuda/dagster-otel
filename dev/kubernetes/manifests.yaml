@@ -1,0 +1,177 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+type: Opaque
+stringData:
+  POSTGRES_PASSWORD: dagster
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            - name: POSTGRES_USER
+              value: dagster
+            - name: POSTGRES_DB
+              value: dagster
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "dagster"]
+            initialDelaySeconds: 3
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jaeger
+  template:
+    metadata:
+      labels:
+        app: jaeger
+    spec:
+      containers:
+        - name: jaeger
+          image: jaegertracing/all-in-one:latest
+          ports:
+            - containerPort: 4317
+            - containerPort: 16686
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger
+spec:
+  selector:
+    app: jaeger
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: ui
+      port: 16686
+      targetPort: 16686
+---
+# Not actually mounted anywhere -- the runner/step pods get their dagster.yaml baked
+# into the image itself (see ../Dockerfile), not from this. Kept only because
+# dagster_home/dagster.yaml's (unused, see its own comment) K8sRunLauncher config
+# references this ConfigMap by name (`instance_config_map: dagster-instance`) as a
+# required constructor argument -- the name has to resolve to *something*, even
+# though nothing in this verification flow actually reads its contents.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dagster-instance
+data:
+  dagster.yaml: |
+    run_storage:
+      module: dagster_postgres.run_storage
+      class: PostgresRunStorage
+      config:
+        postgres_db:
+          username: dagster
+          password: dagster
+          hostname: postgres
+          db_name: dagster
+          port: 5432
+    event_log_storage:
+      module: dagster_postgres.event_log
+      class: PostgresEventLogStorage
+      config:
+        postgres_db:
+          username: dagster
+          password: dagster
+          hostname: postgres
+          db_name: dagster
+          port: 5432
+    schedule_storage:
+      module: dagster_postgres.schedule_storage
+      class: PostgresScheduleStorage
+      config:
+        postgres_db:
+          username: dagster
+          password: dagster
+          hostname: postgres
+          db_name: dagster
+          port: 5432
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dagster-runner
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dagster-runner
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "pods/status"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dagster-runner
+subjects:
+  - kind: ServiceAccount
+    name: dagster-runner
+roleRef:
+  kind: Role
+  name: dagster-runner
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dagster-storage
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 100Mi

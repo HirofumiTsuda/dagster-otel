@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: dagster-runner
+spec:
+  serviceAccountName: dagster-runner
+  restartPolicy: Never
+  containers:
+    - name: runner
+      image: dagster-otel-k8s-e2e:latest
+      imagePullPolicy: Never
+      command:
+        - dagster
+        - job
+        - execute
+        - -f
+        - /workspace/k8s_e2e_job.py
+        - -j
+        - k8s_e2e_job
+        - --config
+        - /workspace/run_config.yaml

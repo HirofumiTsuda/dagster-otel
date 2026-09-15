@@ -1,0 +1,22 @@
+execution:
+  config:
+    job_namespace: default
+    job_image: "dagster-otel-k8s-e2e:latest"
+    service_account_name: dagster-runner
+    env_vars:
+      - "OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317"
+      - "OTEL_SERVICE_NAME=k8s_e2e_test"
+    # fs_io_manager (the default) writes op outputs to local disk -- each step pod is
+    # a fresh container with no shared filesystem of its own, so a downstream step's
+    # pod can't see an upstream step's pod's output without one. A single shared PVC
+    # works here because the kind cluster is single-node (ReadWriteOnce is enough,
+    # since every pod lands on the same node) -- unrelated to trace propagation
+    # itself (that goes through postgres via run tags, not this), just a prerequisite
+    # for the job to run to completion at all under k8s_job_executor.
+    volumes:
+      - name: dagster-storage
+        persistentVolumeClaim:
+          claimName: dagster-storage
+    volume_mounts:
+      - name: dagster-storage
+        mount_path: /dagster-home/storage

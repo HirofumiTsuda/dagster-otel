@@ -1,0 +1,43 @@
+# Never actually used to launch a run here (the runner pod invokes `dagster job
+# execute` directly), but dagster_k8s.executor's container-context merge logic reads
+# defaults (image_pull_policy etc.) off `instance.run_launcher` unconditionally, so a
+# K8sRunLauncher still needs to be configured and constructible even though nothing
+# calls launch_run() on it. instance_config_map references the same ConfigMap this
+# dagster.yaml itself is baked from the contents of (see manifests.yaml).
+run_launcher:
+  module: dagster_k8s
+  class: K8sRunLauncher
+  config:
+    service_account_name: dagster-runner
+    instance_config_map: dagster-instance
+    job_namespace: default
+run_storage:
+  module: dagster_postgres.run_storage
+  class: PostgresRunStorage
+  config:
+    postgres_db:
+      username: dagster
+      password: dagster
+      hostname: postgres
+      db_name: dagster
+      port: 5432
+event_log_storage:
+  module: dagster_postgres.event_log
+  class: PostgresEventLogStorage
+  config:
+    postgres_db:
+      username: dagster
+      password: dagster
+      hostname: postgres
+      db_name: dagster
+      port: 5432
+schedule_storage:
+  module: dagster_postgres.schedule_storage
+  class: PostgresScheduleStorage
+  config:
+    postgres_db:
+      username: dagster
+      password: dagster
+      hostname: postgres
+      db_name: dagster
+      port: 5432

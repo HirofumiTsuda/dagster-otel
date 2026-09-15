@@ -1,11 +1,17 @@
 # dagster-otel
 
+[![PyPI](https://img.shields.io/pypi/v/dagster-otel)](https://pypi.org/project/dagster-otel/)
+[![Python versions](https://img.shields.io/pypi/pyversions/dagster-otel)](https://pypi.org/project/dagster-otel/)
+[![Release](https://img.shields.io/github/v/release/HirofumiTsuda/dagster-otel)](https://github.com/HirofumiTsuda/dagster-otel/releases/latest)
+[![CI](https://github.com/HirofumiTsuda/dagster-otel/actions/workflows/ci.yml/badge.svg)](https://github.com/HirofumiTsuda/dagster-otel/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/github/license/HirofumiTsuda/dagster-otel)](LICENSE)
+
 OpenTelemetry tracing for Dagster ops and assets -- with trace/span IDs correlated into
 your own log lines -- without giving up ownership of your op/asset definitions to a
 third-party decorator, and without monkeypatching Dagster internals.
 
-**Status: early prototype, self-tested locally against real Dagster runs + a real
-trace backend. Not published to PyPI yet.**
+**Status: early release, self-tested locally against real Dagster runs (`multiprocess`,
+`k8s_job_executor`, retry-from-failure) + a real trace backend.**
 
 ```python
 from dagster import asset, job, op

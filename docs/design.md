@@ -497,11 +497,46 @@ cluster spin-up per-PR is heavy for a one-off verification, unlike
 against its own regressions), but rerunnable by hand if `dagster`/`dagster-k8s`/
 `dagster-postgres` get bumped and this needs reconfirming.
 
+## Verified against a real retry-from-failure run (Issue #4, 2026-09-15)
+
+Confirmed by direct testing, not just the fake-instance unit tests
+(`test_run_id_and_ancestors_walks_parent_chain`,
+`test_find_trace_context_falls_back_to_ancestor_run`): a two-step job (`root_op` ->
+`failing_op`, both `@traced()`), `failing_op` deliberately failing on its first
+attempt (gated by a marker file) and succeeding on a second, executed via Dagster's
+real reexecution API (`execute_job(..., reexecution_options=
+ReexecutionOptions.from_failure(original_run_id, instance))` -- the same mechanism
+the Dagster UI's "Re-execute from failure" button uses).
+
+Confirmed the retry run's step selection actually exercises what this needs tested:
+Dagster reused `root_op`'s output from the original run rather than re-running it --
+the retry run's own event log shows only `failing_op` ever started. That matters
+because it means `failing_op`'s `@traced()` call in the retry run *cannot* find a
+trace context published within its own run -- `root_op`'s `publish_trace_context`
+call only ever happened in the original run's process, which is exactly the case
+`_run_id_and_ancestors` (walking `parent_run_id`) exists for.
+
+Jaeger confirmed all three spans across both runs landed in one trace, correctly
+nested:
+
+```
+root_op                CHILD_OF 0000000000000001    (original run)
+failing_op (attempt 1) CHILD_OF root_op              (original run, the failed attempt)
+failing_op (attempt 2) CHILD_OF root_op              (retry run, parent_run_id = original)
+```
+
+Both `failing_op` spans -- the failed first attempt *and* the successful retry, two
+different Dagster runs, two different processes, no shared memory -- correctly
+parented under `root_op`'s span from the original run. `retry_run.parent_run_id`
+matched the original run's ID exactly as `_run_id_and_ancestors` assumes.
+
 ## Open questions
 
-- Retry-from-failure (`_run_id_and_ancestors` walking `parent_run_id`): ported from
-  formenergy-observability's approach but not yet exercised against an actual
-  retried/re-executed run in this repo.
+None currently tracked -- multi-root/fan-in (#5), k8s_job_executor (#3), and
+retry-from-failure (#4) were the three open verification questions, and all three are
+now confirmed against real Dagster, not just reasoned through. See
+[#11](https://github.com/HirofumiTsuda/dagster-otel/issues/11) for what's still
+missing before a release, not this library's own behavior.
 
 ## License
 

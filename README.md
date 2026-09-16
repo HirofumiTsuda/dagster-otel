@@ -102,6 +102,21 @@ working), just never sent anywhere, so trying `@traced()` with zero setup never 
 a surprise network call. See [docs/design.md](docs/design.md) for the one deliberate
 tradeoff this makes.
 
+Nesting a whole run's trace under an external caller's (a CI/CD pipeline, a
+scheduler, another OTel-instrumented system) is a run tag, not an env var -- set
+`EXTERNAL_TRACE_CONTEXT_TAG_KEY` (exported from `dagster_otel`) at launch time:
+
+```python
+from dagster_otel import EXTERNAL_TRACE_CONTEXT_TAG_KEY
+
+carrier: dict[str, str] = {}
+TraceContextTextMapPropagator().inject(carrier)  # from your own active span
+my_job.execute_in_process(tags={EXTERNAL_TRACE_CONTEXT_TAG_KEY: json.dumps(carrier)})
+```
+
+Every root step in the run (the ones that would otherwise seed a fresh trace) checks
+for this tag first. See [docs/design.md](docs/design.md) for the full verification.
+
 ## Compatibility
 
 Built and verified against **Dagster 1.13.22** and **`opentelemetry-sdk` 1.44.0**

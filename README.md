@@ -150,10 +150,11 @@ with no `endpoint=`/`headers=`/`credentials=`, so anything speaking OTLP should 
 purely via the env vars above. What's actually been checked end-to-end, not just
 assumed to work by construction:
 
-- [x] Jaeger -- fully verified (`multiprocess`/`k8s_job_executor`/retry-from-failure/
-  `traced_dbt()`/external trace context), see [docs/design.md](docs/design.md)
-- [ ] Grafana Tempo ([#42](https://github.com/HirofumiTsuda/dagster-otel/issues/42))
-- [ ] SigNoz ([#43](https://github.com/HirofumiTsuda/dagster-otel/issues/43))
+| Backend | License | Status |
+| --- | --- | --- |
+| Jaeger | Apache-2.0 | ✅ Verified -- `multiprocess`/`k8s_job_executor`/retry-from-failure/`traced_dbt()`/external trace context, see [docs/design.md](docs/design.md) |
+| Grafana Tempo | AGPL-3.0 | ⬜ Not yet -- [#42](https://github.com/HirofumiTsuda/dagster-otel/issues/42) |
+| SigNoz | MIT | ⬜ Not yet -- [#43](https://github.com/HirofumiTsuda/dagster-otel/issues/43) |
 
 Should work the same way against any other OTLP-compatible backend (Honeycomb,
 Datadog, New Relic, a generic OTel Collector, ...) -- just not individually checked

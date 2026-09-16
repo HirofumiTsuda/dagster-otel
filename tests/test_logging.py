@@ -9,8 +9,13 @@ from dagster_otel._logging import TraceContextFilter
 
 def _make_record() -> logging.LogRecord:
     return logging.LogRecord(
-        name="test", level=logging.INFO, pathname=__file__, lineno=1,
-        msg="hello", args=(), exc_info=None,
+        name="test",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="hello",
+        args=(),
+        exc_info=None,
     )
 
 

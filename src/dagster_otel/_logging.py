@@ -12,6 +12,7 @@ user-defined @logger, see DagsterLogHandler._extract_extra), so a @logger that r
 record.trace_id/record.span_id gets real log/trace correlation. No Dagster internals
 touched -- this is Logger.addFilter(), a fully public API.
 """
+
 import logging
 
 from opentelemetry import trace

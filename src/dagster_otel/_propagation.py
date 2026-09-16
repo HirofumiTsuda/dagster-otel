@@ -189,9 +189,7 @@ def publish_trace_context(context: ExecutionContext) -> None:
     context.instance.add_run_tags(context.run_id, {tag_key: json.dumps(carrier)})
 
 
-def _find_context_for_step_key(
-    runs: Sequence[DagsterRun], step_key: str
-) -> dict[str, str] | None:
+def _find_context_for_step_key(runs: Sequence[DagsterRun], step_key: str) -> dict[str, str] | None:
     """The trace context a specific step published, if any -- searching the given
     runs (see _ancestor_runs) in order."""
     tag_key = _TAG_PREFIX + step_key

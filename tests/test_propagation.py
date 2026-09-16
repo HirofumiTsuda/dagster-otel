@@ -33,9 +33,7 @@ def test_own_step_key_uses_real_step_key_for_dynamic_mapping() -> None:
     `op_handle.path` never carries -- `_own_step_key` must use the real
     `ExecutionStep.key` (here, the fake context's `step_key` param), not reconstruct
     one from `op_path`."""
-    ctx = make_context(
-        FakeInstance(), "run-1", ["process_file"], step_key="process_file[a.txt]"
-    )
+    ctx = make_context(FakeInstance(), "run-1", ["process_file"], step_key="process_file[a.txt]")
     assert _own_step_key(ctx) == "process_file[a.txt]"
 
 
@@ -47,16 +45,12 @@ def test_find_upstream_trace_contexts_distinguishes_parallel_mapped_instances() 
     exactly that one -- not whichever instance happened to publish last."""
     instance = FakeInstance()
 
-    instance_a = make_context(
-        instance, "run-1", ["process_file"], step_key="process_file[a.txt]"
-    )
+    instance_a = make_context(instance, "run-1", ["process_file"], step_key="process_file[a.txt]")
     with trace.get_tracer("test").start_as_current_span("process_file[a.txt]"):
         publish_trace_context(instance_a)
         trace_id_a = trace.get_current_span().get_span_context().trace_id
 
-    instance_b = make_context(
-        instance, "run-1", ["process_file"], step_key="process_file[b.txt]"
-    )
+    instance_b = make_context(instance, "run-1", ["process_file"], step_key="process_file[b.txt]")
     with trace.get_tracer("test").start_as_current_span("process_file[b.txt]"):
         publish_trace_context(instance_b)
 
@@ -64,9 +58,7 @@ def test_find_upstream_trace_contexts_distinguishes_parallel_mapped_instances() 
 
     # A downstream step depending on exactly one mapped instance (the real
     # dependency_keys shape, "op_name[mapping_key]") must find only that instance.
-    collect_ctx = make_context(
-        instance, "run-1", ["collect_op"], deps=["process_file[a.txt]"]
-    )
+    collect_ctx = make_context(instance, "run-1", ["collect_op"], deps=["process_file[a.txt]"])
     found = find_upstream_trace_contexts(collect_ctx)
     assert len(found) == 1
     assert format(trace_id_a, "032x") in found[0]["traceparent"]
@@ -168,9 +160,7 @@ def test_find_upstream_trace_contexts_fan_in_partial_publish() -> None:
     with trace.get_tracer("test").start_as_current_span("root_a"):
         publish_trace_context(root_a_ctx)
 
-    merge_ctx = make_context(
-        instance, "run-1", ["merge_op"], deps=["root_a", "untraced_root_b"]
-    )
+    merge_ctx = make_context(instance, "run-1", ["merge_op"], deps=["root_a", "untraced_root_b"])
     found = find_upstream_trace_contexts(merge_ctx)
     assert len(found) == 1
 

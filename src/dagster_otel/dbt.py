@@ -55,6 +55,7 @@ metadata the `Output`/`AssetCheckResult` path already reads. `AssetObservation` 
 no `check_name`/`passed` fields at all (unlike the other two), so it gets a generic
 span name and no pass/fail status set, rather than one invented.
 """
+
 import time
 from collections.abc import Callable, Generator
 from functools import wraps

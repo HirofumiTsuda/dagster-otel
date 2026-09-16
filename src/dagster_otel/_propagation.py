@@ -133,9 +133,25 @@ def _ancestor_runs(context: ExecutionContext) -> list[DagsterRun]:
 
 def _own_step_key(context: ExecutionContext) -> str:
     """This step's own identifier, in the same string form Dagster's own dependency
-    info (StepInput.dependency_keys, see _upstream_step_keys) uses to reference it --
-    verified these match (both are `".".join(op_handle.path)`-shaped)."""
-    return ".".join(context.op_handle.path)
+    info (StepInput.dependency_keys, see _upstream_step_keys) uses to reference it.
+
+    `context.get_step_execution_context().step.key` (`ExecutionStep.key`, a
+    `StepHandle`/`ResolvedFromDynamicStepHandle.to_key()`), not
+    `".".join(context.op_handle.path)` (Issue #45) -- the two agree for an ordinary,
+    non-mapped step (verified: `StepHandle.key` defaults to `str(node_handle)`, and
+    `NodeHandle.__str__` builds the identical dotted-path string `.path` does), but
+    diverge for a step produced by Dagster's dynamic graph mapping (`DynamicOut`/
+    `.map()`): `op_handle` has no `mapping_key` on it at all, while the real,
+    per-mapped-instance step key is `f"{node_handle}[{mapping_key}]"`
+    (`StepHandle.parse_from_key`'s own regex). Using `op_handle.path` made every
+    parallel invocation of one mapped op compute the identical key -- concurrent
+    instances raced to overwrite the same run tag, and a downstream collect step's
+    `dependency_keys` (which *do* include `[mapping_key]`) could never match what
+    was published, silently falling back to the deterministic root seed instead of
+    finding its real parent. `step.key` is exactly the `[mapping_key]`-suffixed
+    string `dependency_keys` already uses, so both sides of the lookup now agree.
+    """
+    return context.get_step_execution_context().step.key
 
 
 def _upstream_step_keys(context: ExecutionContext) -> frozenset[str]:

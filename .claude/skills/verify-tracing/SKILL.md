@@ -1,17 +1,25 @@
 ---
 name: verify-tracing
-description: Verify a dagster-otel change end to end against a real Dagster run and a real trace backend — confirm spans actually nest correctly across processes, and that log lines actually carry trace_id/span_id. Use whenever changing the propagation mechanism (_propagation.py), the traced() decorator, or the logging filter. Unit tests that mock Dagster's context object cannot catch a change to internal Dagster behavior (op_handle shape, event log query behavior, DagsterLogManager's class hierarchy) that this library depends on.
+description: Verify a dagster-otel change end to end against a real Dagster run and a real trace backend — confirm spans actually nest correctly across processes, and that log lines actually carry trace_id/span_id. Use whenever changing the propagation mechanism (_propagation.py), the traced() decorator, or the logging filter. Unit tests that mock Dagster's context object cannot catch a change to internal Dagster behavior (op_handle shape, StepInput.dependency_keys, DagsterLogManager's class hierarchy) that this library depends on.
 ---
 
 # Verify tracing end to end
 
 This library leans on internal Dagster behavior that isn't a public contract: the
-shape of `context.op_handle`, `context.instance.all_logs(...)`, and the fact that
-`DagsterLogManager` subclasses `logging.Logger`. A unit test with a mocked context can
-prove the Python code runs — it cannot prove Dagster still behaves the way this library
-assumes. The whole point of this project (see docs/design.md) is that this behavior
-has held for 3+ years unmodified, but that's an empirical finding, not a guarantee —
-recheck it against a real instance whenever the propagation or logging code changes.
+shape of `context.op_handle`, `context.instance.add_run_tags`/`get_run_by_id` (the
+run-tag transport trace contexts are published/looked up through — see
+`_propagation.py`'s module docstring), `context.get_step_execution_context().step
+.step_inputs[*].dependency_keys` (how a step's real upstream keys are resolved --
+explicitly flagged in that module's own docstring as the accepted-risk internal-API
+dependence, since it's not `@public`), and the fact that `DagsterLogManager`
+subclasses `logging.Logger`. A unit test with a mocked context can prove the Python
+code runs — it cannot prove Dagster still behaves the way this library assumes. The
+whole point of this project (see docs/design.md) is that this behavior has held
+across the versions checked so far, but that's an empirical finding, not a
+guarantee — recheck it against a real instance whenever the propagation or logging
+code changes. (Skill last synced to the current implementation 2026-09-16 -- if
+`_propagation.py`'s own "what we depend on" docstring changes, re-check this file
+against it, since nothing else catches this skill going stale.)
 
 ## 1. Bring up a real trace backend
 
@@ -61,10 +69,12 @@ for trace in d['data']:
 ```
 
 The downstream step's span must show the root step's span ID as its parent. If it
-shows no parent (a fresh root trace) or the run threw `Could not find trace context`,
-propagation broke — check `_find_trace_context`'s `op_handle.path` walk and the
-`AssetMaterialization` metadata key first, since those are exactly what a Dagster
-internals change would most likely touch.
+shows no parent (a fresh root trace, i.e. it silently fell back to
+`_seed_run_root_context`) or the run threw an exception, propagation broke — check
+`find_upstream_trace_contexts`/`_find_context_for_step_key` (`_propagation.py`) and
+the run-tag key format (`dagster_otel/trace_context/<step_key>`, readable directly
+via `dagster instance` tooling or `instance.get_run_by_id(run_id).tags`) first, since
+those are exactly what a Dagster internals change would most likely touch.
 
 ## 4. Check log correlation separately — it uses a different code path
 

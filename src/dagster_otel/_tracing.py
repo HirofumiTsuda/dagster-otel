@@ -62,6 +62,7 @@ from dagster_otel._propagation import (
     _own_step_key,
     _seed_run_root_context,
     carrier_to_span_context,
+    find_external_trace_context,
     find_previous_attempt_context,
     find_upstream_trace_contexts,
     publish_trace_context,
@@ -126,13 +127,22 @@ def _traced_span(context: ExecutionContext, name: str) -> Generator[None, None, 
         links = [Link(carrier_to_span_context(c)) for c in secondary_contexts]
     else:
         # No real parent found -- a genuine root, or every direct upstream is
-        # untraced (see _propagation.py's "Residual limitation"). Don't fall through
-        # to a fresh, randomly-generated trace_id -- that's what caused the confirmed
-        # multi-root collision (see _propagation.py module docstring): every step
-        # derives the same trace_id deterministically from the run ID instead, so
-        # independent branches still end up in one trace even when none of them can
-        # find a real parent.
-        _seed_run_root_context(context)
+        # untraced (see _propagation.py's "Residual limitation"). Issue #13: an
+        # external caller (CI/CD, a scheduler, another OTel-instrumented system) may
+        # have seeded this whole run to nest under its own trace -- checked before
+        # falling all the way back to the deterministic run_id seed, so every root
+        # step in the run activates the *same* real external parent when one was
+        # provided, the same way every root currently activates the same synthetic
+        # seed when one wasn't. Don't fall through to a fresh, randomly-generated
+        # trace_id in either case -- that's what caused the confirmed multi-root
+        # collision (see _propagation.py module docstring): every step with no real
+        # parent derives the *same* trace_id (external or deterministic-seeded)
+        # instead, so independent branches still end up in one trace together.
+        external_context = find_external_trace_context(context)
+        if external_context is not None:
+            _activate_trace_context(external_context)
+        else:
+            _seed_run_root_context(context)
         links = []
 
     # Issue #14: an op-level RetryPolicy retry re-executes the same step as a fresh

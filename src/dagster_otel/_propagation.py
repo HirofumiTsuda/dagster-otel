@@ -89,6 +89,15 @@ from dagster_otel._types import ExecutionContext
 #: (see _own_step_key) -- e.g. "dagster_otel/trace_context/root_a".
 _TAG_PREFIX = "dagster_otel/trace_context/"
 
+#: Run tag key a *caller* sets (before/while triggering a run -- e.g. `tags={
+#: EXTERNAL_TRACE_CONTEXT_TAG_KEY: json.dumps(carrier)}` at execute_job()/CLI launch
+#: time), not something this library ever writes itself, to nest a whole run's trace
+#: under whatever triggered it (Issue #13) -- a CI/CD pipeline, a scheduler, another
+#: OTel-instrumented system. Distinct from _TAG_PREFIX (which is per-step, written by
+#: every @traced() step) -- this is per-run, written at most once, by something
+#: outside Dagster entirely.
+EXTERNAL_TRACE_CONTEXT_TAG_KEY = "dagster_otel/external_trace_context"
+
 
 def _run_id_and_ancestors(context: ExecutionContext) -> list[str]:
     """The current run's ID, then any ancestor run IDs (oldest last).
@@ -183,6 +192,41 @@ def find_upstream_trace_contexts(context: ExecutionContext) -> list[dict[str, st
         for key in sorted(_upstream_step_keys(context))
         if (carrier := _find_context_for_step_key(context, key)) is not None
     ]
+
+
+def find_external_trace_context(context: ExecutionContext) -> dict[str, str] | None:
+    """The trace context an external caller published before/while triggering this
+    run, if any (Issue #13) -- e.g. a CI/CD pipeline or another OTel-instrumented
+    system that wants this whole run's trace nested under its own, not starting a
+    fresh unrelated one.
+
+    Unlike every other lookup in this module, this reads a tag this library never
+    writes itself -- the caller sets `EXTERNAL_TRACE_CONTEXT_TAG_KEY` directly (e.g.
+    via `tags={EXTERNAL_TRACE_CONTEXT_TAG_KEY: json.dumps(carrier)}` at launch time),
+    before any `@traced()` step runs. Confirmed against real Dagster + Jaeger that a
+    tag set this way (via `execute_job(tags=...)` and CLI `--tags` alike) is visible
+    from `context.instance.get_run_by_id(context.run_id).tags` by the time any step
+    starts -- the same read path every other propagation lookup here already uses.
+
+    Walks `_run_id_and_ancestors`, same as `_find_context_for_step_key` -- checked
+    directly against a real retry-from-failure run (2026-09-15) that Dagster does
+    *not* copy a run's tags forward to a retry by default (confirmed: a custom tag
+    set on the original run was simply absent from `instance.get_run_by_id(retry_run_id)
+    .tags`, an empty dict). So a retried run needs the same parent-run walk every
+    other cross-run lookup here already does, to still find what the *original*
+    launch was seeded with -- without it, only the original run's own root steps
+    would ever see the external context, and a retry would silently fall back to the
+    deterministic run_id seed instead.
+    """
+    for run_id in _run_id_and_ancestors(context):
+        run = context.instance.get_run_by_id(run_id)
+        if run is None:
+            continue
+        tag_value = run.tags.get(EXTERNAL_TRACE_CONTEXT_TAG_KEY)
+        if tag_value is not None:
+            result: dict[str, str] = json.loads(tag_value)
+            return result
+    return None
 
 
 def find_previous_attempt_context(context: ExecutionContext) -> dict[str, str] | None:

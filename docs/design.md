@@ -737,6 +737,57 @@ decorated name to the unconfigured inner decorator function, not the traced
 original), fixed the same way, verified against real Dagster + Jaeger the same way
 (identical 16-span trace either form).
 
+## Externally-provided trace context to seed a run (Issue #13, 2026-09-16)
+
+Everything so far handles propagation *within* a run (step to step, via run tags).
+Nothing let a whole run itself nest under a trace something *outside* Dagster
+started -- a CI/CD pipeline, a scheduler, another OTel-instrumented system triggering
+a Dagster run and wanting its steps to show up under *its own* trace, not start a
+fresh unrelated one. Idea originally surfaced while researching Airflow's native OTel
+support, which lets a `dag_run`'s `conf` carry reserved tracing-control keys set at
+trigger time.
+
+Dagster runs can already be launched with `tags={...}` (CLI `--tags`, the Python API,
+`RunRequest(tags=...)` for sensors, etc.), and tags are already exactly this
+library's own propagation transport. So the shape: `EXTERNAL_TRACE_CONTEXT_TAG_KEY`
+(`dagster_otel/external_trace_context`, exported from the top-level package) is a
+tag key *this library never writes itself* -- the launching caller sets it directly,
+carrying the same W3C traceparent carrier shape `publish_trace_context` writes. Every
+root step in a run (the ones that would otherwise fall back to
+`_seed_run_root_context`'s deterministic seed) checks for this tag first via
+`find_external_trace_context`, activating it instead when present.
+
+A real gotcha caught only by testing against an actual retry, not assumed: **Dagster
+does not copy a run's tags forward to a retry-from-failure run** -- confirmed
+directly (`execute_job(tags={"custom": "value"})` then
+`ReexecutionOptions.from_failure(...)`: the retry run's own tags came back `{}`,
+completely empty). So `find_external_trace_context`, like every other cross-run
+lookup here, has to walk `_run_id_and_ancestors` rather than checking only the
+current run's own tags -- without that, a retried run's root steps would silently
+fall back to the deterministic seed instead of still nesting under the original
+external caller.
+
+Verified against real Dagster + Jaeger: a real "external caller" span (simulating a
+CI/CD pipeline) with its `traceparent` passed via the tag at `execute_job(tags=...)`
+launch time, a two-step job (`root_op` -> `child_op`):
+
+```
+external-ci-pipeline-step
+  root_op    CHILD_OF external-ci-pipeline-step
+    child_op CHILD_OF root_op
+```
+
+`root_op` (a genuine root, no real Dagster-internal upstream) correctly became a
+child of the external span; `child_op`'s propagation *within* the run kept working
+completely unmodified. A real gotcha caught while first probing this manually (not
+part of the design, a mistake in the probe script): the op body runs in its own
+subprocess under `multiprocess` (the default executor), so `configure()` has to run
+in that subprocess too, same as `@traced()` always does -- forgetting it (writing a
+standalone probe that skipped `@traced()`/`configure()` entirely) silently no-op'd
+span creation, `span.parent` came back `None` even though the tag lookup itself
+worked correctly. Not a gap in the actual design, a reminder this only works because
+`@traced()` already calls `configure()` itself every time.
+
 ## Open questions
 
 None currently tracked -- multi-root/fan-in (#5), k8s_job_executor (#3), and

@@ -1,8 +1,12 @@
 """Tests for dagster_otel._tracing: the public @traced() decorator."""
 
-from conftest import FakeInstance, make_context
+import json
 
-from dagster_otel import traced
+from conftest import FakeInstance, make_context
+from opentelemetry import trace
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+from dagster_otel import EXTERNAL_TRACE_CONTEXT_TAG_KEY, traced
 
 
 def test_traced_preserves_plain_return_value() -> None:
@@ -300,3 +304,51 @@ def test_traced_retry_gets_link_to_previous_attempt(spans) -> None:
     assert retry_span.links[0].context.span_id == first_span.context.span_id
     # And the first attempt itself has no such link -- nothing preceded it.
     assert len(first_span.links) == 0
+
+
+def test_traced_root_nests_under_externally_provided_context(spans) -> None:
+    """Issue #13: a run tag an external caller sets at launch time (before any
+    @traced() step runs -- simulated here with add_run_tags() directly, not
+    publish_trace_context(), since this library never writes this tag itself) makes
+    a root step's span a real child of that external span, instead of falling back
+    to the deterministic run_id seed."""
+    instance = FakeInstance()
+    instance.create_run("run-1")
+
+    # A real "external caller" span -- e.g. a CI/CD pipeline that triggered this run.
+    with trace.get_tracer("external_caller").start_as_current_span("external-step"):
+        external_span_id = trace.get_current_span().get_span_context().span_id
+        external_trace_id = trace.get_current_span().get_span_context().trace_id
+        carrier: dict[str, str] = {}
+        TraceContextTextMapPropagator().inject(carrier)
+
+    instance.add_run_tags("run-1", {EXTERNAL_TRACE_CONTEXT_TAG_KEY: json.dumps(carrier)})
+    spans.clear()  # drop the "external-step" span itself -- only asserting on root_op's
+
+    @traced()
+    def root_op(context) -> None:
+        pass
+
+    root_op(make_context(instance, "run-1", ["root_op"]))
+
+    (span,) = spans.get_finished_spans()
+    assert span.context.trace_id == external_trace_id
+    assert span.parent is not None
+    assert span.parent.span_id == external_span_id
+
+
+def test_traced_root_falls_back_to_deterministic_seed_without_external_context(
+    spans,
+) -> None:
+    """No EXTERNAL_TRACE_CONTEXT_TAG_KEY tag set -- unchanged existing behavior,
+    the deterministic run_id-seed fallback, not broken by adding the new check."""
+
+    @traced()
+    def root_op(context) -> None:
+        pass
+
+    root_op(make_context(FakeInstance(), "run-1", ["root_op"]))
+
+    (span,) = spans.get_finished_spans()
+    assert span.parent is not None
+    assert span.parent.span_id == 0x1  # _seed_run_root_context's fixed placeholder

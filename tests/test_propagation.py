@@ -3,16 +3,20 @@ transport, keyed by each step's own real dependency graph (see the module's docs
 "Keyed by real step dependencies, not subgraph path", for why -- subgraph-path keying
 let two independent roots collide)."""
 
+import json
+
 from conftest import FakeInstance, make_context
 from opentelemetry import trace
 from opentelemetry.trace import Link
 
 from dagster_otel._propagation import (
+    EXTERNAL_TRACE_CONTEXT_TAG_KEY,
     _own_step_key,
     _run_id_and_ancestors,
     _seed_run_root_context,
     _upstream_step_keys,
     carrier_to_span_context,
+    find_external_trace_context,
     find_previous_attempt_context,
     find_upstream_trace_contexts,
     publish_trace_context,
@@ -230,3 +234,37 @@ def test_find_previous_attempt_context_finds_the_prior_attempt() -> None:
     found = find_previous_attempt_context(retry_ctx)
     assert found is not None
     assert format(first_trace_id, "032x") in found["traceparent"]
+
+
+def test_find_external_trace_context_none_when_not_set() -> None:
+    ctx = make_context(FakeInstance(), "run-1", ["root_op"])
+    assert find_external_trace_context(ctx) is None
+
+
+def test_find_external_trace_context_finds_it() -> None:
+    """A caller setting EXTERNAL_TRACE_CONTEXT_TAG_KEY at launch time (before any
+    @traced() step runs) is exactly what this simulates -- add_run_tags() directly,
+    not via publish_trace_context() (which this library never calls for this key)."""
+    instance = FakeInstance()
+    instance.create_run("run-1")
+    carrier = {"traceparent": "00-" + "a" * 32 + "-" + "b" * 16 + "-01"}
+    instance.add_run_tags("run-1", {EXTERNAL_TRACE_CONTEXT_TAG_KEY: json.dumps(carrier)})
+
+    ctx = make_context(instance, "run-1", ["root_op"])
+    assert find_external_trace_context(ctx) == carrier
+
+
+def test_find_external_trace_context_found_via_ancestor_run() -> None:
+    """Confirmed against a real retry-from-failure run (see this function's own
+    docstring) that Dagster does *not* copy a run's tags forward to a retry --
+    the retry run's own tags start empty. So a retry still needs the ancestor walk
+    to find what the *original* run was seeded with."""
+    instance = FakeInstance()
+    instance.create_run("original")
+    instance.create_run("retry", parent_run_id="original")
+    carrier = {"traceparent": "00-" + "c" * 32 + "-" + "d" * 16 + "-01"}
+    instance.add_run_tags("original", {EXTERNAL_TRACE_CONTEXT_TAG_KEY: json.dumps(carrier)})
+
+    # The retry run's own tags are empty -- nothing set directly on it.
+    retry_ctx = make_context(instance, "retry", ["root_op"])
+    assert find_external_trace_context(retry_ctx) == carrier

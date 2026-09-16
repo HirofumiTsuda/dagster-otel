@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from dagster import AssetKey
 from opentelemetry import context as otel_context
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
@@ -101,17 +102,19 @@ def make_context(
     job_name: str = "test_job",
     retry_number: int = 0,
     step_key: str | None = None,
+    asset_keys: list[str] | None = None,
 ) -> ExecutionContext:
     """A fake op/asset execution context with just enough surface for dagster_otel:
     op_handle.path, run_id, job_name, retry_number, instance, log_event (unused since
     the run-tags switch, but harmless to keep), log (a real logging.Logger --
     context.log is a genuine logging.Logger subclass in real Dagster too, see
     _logging.py's module docstring, so using a plain one here matches the real shape
-    rather than faking it), and get_step_execution_context().step.step_inputs[*].
-    dependency_keys / .step.key -- the same public method (see _propagation.py's
-    _upstream_step_keys/_own_step_key docstrings) real Dagster defines identically on
-    both OpExecutionContext and AssetExecutionContext, so this fake doesn't need to
-    model the two context shapes differently either.
+    rather than faking it), get_step_execution_context().step.step_inputs[*].
+    dependency_keys / .step.key, and selected_asset_keys -- the same public
+    properties/methods (see _propagation.py's _upstream_step_keys/_own_step_key
+    docstrings, and _tracing.py's asset_keys attribute comment) real Dagster defines
+    identically on both OpExecutionContext and AssetExecutionContext, so this fake
+    doesn't need to model the two context shapes differently either.
 
     :param deps: step_keys this step directly depends on, matching real Dagster's
         `StepInput.dependency_keys` -- e.g. `deps=["root_op"]` for a step whose only
@@ -125,6 +128,10 @@ def make_context(
         `".".join(op_path)`, the same value a non-mapped step's real `step.key`
         resolves to (verified in Issue #45). Pass a `"op_name[mapping_key]"`-shaped
         string to simulate a dynamic-mapped step, where this diverges from `op_path`.
+    :param asset_keys: matches real Dagster's `context.selected_asset_keys` -- plain
+        strings, one `AssetKey` each (matching how a real single-part AssetKey's own
+        `to_user_string()` round-trips). Defaults to none (a plain op, matching real
+        Dagster's own empty-set return for `has_assets_def=False`).
     """
     if instance.get_run_by_id(run_id) is None:
         instance.create_run(run_id)
@@ -141,4 +148,5 @@ def make_context(
         log_event=lambda event: None,
         log=logging.getLogger(f"test.{run_id}.{'.'.join(op_path)}"),
         get_step_execution_context=lambda: step_execution_context,
+        selected_asset_keys=frozenset(AssetKey(k) for k in (asset_keys or [])),
     )

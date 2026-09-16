@@ -274,6 +274,54 @@ def test_traced_sets_dagster_context_span_attributes(spans) -> None:
     assert span.attributes["dagster.retry_number"] == 2
 
 
+def test_traced_plain_op_has_no_asset_keys_attribute(spans) -> None:
+    """Issue #37: a plain @op (no assets_def at all) has no selected_asset_keys --
+    the attribute must be omitted entirely, not set to an empty string."""
+
+    @traced()
+    def my_op(context) -> None:
+        pass
+
+    ctx = make_context(FakeInstance(), "run-1", ["my_op"])
+    my_op(ctx)
+
+    (span,) = spans.get_finished_spans()
+    assert "dagster.asset_keys" not in span.attributes
+
+
+def test_traced_single_asset_gets_asset_keys_attribute(spans) -> None:
+    """A plain single-output @asset should still get dagster.asset_keys -- not just
+    multi_asset -- since selected_asset_keys works uniformly for both."""
+
+    @traced()
+    def my_asset(context) -> None:
+        pass
+
+    ctx = make_context(FakeInstance(), "run-1", ["my_asset"], asset_keys=["my_asset"])
+    my_asset(ctx)
+
+    (span,) = spans.get_finished_spans()
+    assert span.attributes["dagster.asset_keys"] == "my_asset"
+
+
+def test_traced_multi_asset_gets_comma_joined_sorted_asset_keys(spans) -> None:
+    """Issue #37: the actual case context.asset_key itself can't handle (raises for
+    a multi_asset with more than one output) -- selected_asset_keys must list every
+    one, comma-joined and sorted for determinism (a set has no stable order)."""
+
+    @traced()
+    def my_multi_asset(context) -> None:
+        pass
+
+    ctx = make_context(
+        FakeInstance(), "run-1", ["my_multi_asset"], asset_keys=["zeta", "alpha", "beta"]
+    )
+    my_multi_asset(ctx)
+
+    (span,) = spans.get_finished_spans()
+    assert span.attributes["dagster.asset_keys"] == "alpha,beta,zeta"
+
+
 def test_traced_retry_gets_link_to_previous_attempt(spans) -> None:
     """Issue #14: a RetryPolicy-triggered retry's span should carry a Link back to
     the previous attempt's span, even though the real parent (here: none, a root)

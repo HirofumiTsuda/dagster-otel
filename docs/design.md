@@ -665,6 +665,78 @@ relationship, unchanged by any of this); the retry additionally links back to th
 attempt it retried. A viewer can now see both facts from the trace alone: what this
 step actually depends on, and that it needed a retry to succeed.
 
+## Per-dbt-node spans via `traced_dbt()` (Issue #8, 2026-09-16)
+
+`@traced()` alone gives `@dbt_assets` exactly one span for the whole step, however
+many dbt nodes it actually materializes internally (confirmed: 15 nodes, 1 span, in
+the jaffle_shop example) -- correct given how `@traced()` works, but coarser than
+necessary, since `dbt.cli(...).stream()`'s `DbtEventIterator` already yields one
+event per node.
+
+Two things this issue's own open questions asked about, both answered by direct
+investigation before writing any code:
+
+- **Does each event carry real timing, or would a per-node span be a zero-duration
+  marker?** Confirmed real: every `Output`/`AssetCheckResult` event carries an
+  `"Execution Duration"` metadata value (dbt's own measured seconds), letting a span
+  be backdated (`start_time = event_arrival_time - duration`) to something accurate,
+  via OTel's explicit `tracer.start_span(..., start_time=...)` +
+  `span.end(end_time=...)` API rather than `start_as_current_span()` (the node
+  already finished by the time Python sees the event -- there's nothing to be
+  "current" for while it runs).
+- **Does this need `dagster-dbt` as an import, justifying a separate optional
+  module/extra?** No -- `Output`/`AssetCheckResult` are core `dagster` types
+  (already a required dependency); a dbt node's metadata just happens to carry
+  `"Execution Duration"`/`"unique_id"` keys by `dagster_dbt`'s own convention.
+  `dagster_otel.dbt` is a separate *module* (so `traced_dbt`'s name is explicit and
+  discoverable, and a non-dbt op that happens to reuse those exact metadata key
+  names for unrelated reasons never gets surprise spans it didn't ask for), not
+  because of any dependency requirement -- see that module's own docstring.
+
+Went further than the issue's original "flat, one span per node" sketch: `Output`'s
+`output_name` resolves to the real Dagster `AssetKey` via the `@public`
+`context.asset_key_for_output(...)`, and `AssetCheckResult.asset_key` already carries
+one directly -- so spans are keyed by Dagster's own asset model, not dbt's internal
+`unique_id`, and a check's span nests as a child of its own asset's span (tracked by
+the most recently seen span per `asset_key` during iteration, matching dbt's own
+build-then-test execution order -- not dependent on any ordering guarantee, just
+confirmed to hold in practice). This incidentally resolves, for exactly this
+multi-asset case, the `dagster.asset_key` attribute Issue #9 deliberately deferred
+(`context.asset_key` itself raises for a `@dbt_assets` function's multiple outputs;
+a specific event's own asset_key is not ambiguous the same way).
+
+`traced_dbt()` requires zero changes to the wrapped function's body -- still exactly
+`yield from dbt.cli(...).stream()` -- reusing `traced()`'s own generator-handling
+branch internally rather than duplicating it (see `dagster_otel/dbt.py`).
+
+Verified against the real jaffle_shop example + Jaeger:
+
+```
+jaffle_shop_dbt_assets                    (the step, unchanged)
+  raw_customers                             (real AssetKey, real ~60ms duration)
+    not_null_raw_customers_first_name       (real ~44ms duration)
+    not_null_raw_customers_id
+    not_null_raw_customers_last_name
+    unique_raw_customers_id
+  stg_customers
+    not_null_stg_customers_customer_id
+    ...
+  customers
+    ...
+```
+
+16 spans total (1 step + 3 assets + 12 checks), matching jaffle_shop's real node
+count exactly, each with an accurate duration matching what dbt itself reported.
+
+`traced_dbt()` also supports bare use (`@traced_dbt`, no parens), via the identical
+`@overload` dispatch pattern `traced()` uses for the same purpose (see that
+function's own module docstring) -- added after initially shipping only the called
+form, once asked directly whether bare use worked. It didn't: confirmed the same
+silent-breakage failure mode `traced()` had before Issue #19 (bare use rebound the
+decorated name to the unconfigured inner decorator function, not the traced
+original), fixed the same way, verified against real Dagster + Jaeger the same way
+(identical 16-span trace either form).
+
 ## Open questions
 
 None currently tracked -- multi-root/fan-in (#5), k8s_job_executor (#3), and

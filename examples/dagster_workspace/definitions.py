@@ -1,7 +1,8 @@
 """Example: dagster-otel applied to a real @dbt_assets pipeline (jaffle_shop).
 
-Verifies two things Issue #2 (https://github.com/HirofumiTsuda/dagster-otel/issues/2)
-asks about, against a real dbt-backed asset graph rather than a hand-written toy:
+Verifies things Issue #2 (https://github.com/HirofumiTsuda/dagster-otel/issues/2) and
+Issue #8 (https://github.com/HirofumiTsuda/dagster-otel/issues/8) ask about, against a
+real dbt-backed asset graph rather than a hand-written toy:
 
 1. `@traced()`'s generator-function handling (see `_tracing.py`'s module docstring)
    against a *real* `@dbt_assets` function -- Dagster requires this to be a generator
@@ -14,6 +15,10 @@ asks about, against a real dbt-backed asset graph rather than a hand-written toy
    fact accept a `loggers=` parameter (see below) -- whether that's new since zyd14's
    2024-07-26 comment or was just missed isn't something this checked, only whether it
    actually works.
+3. `traced_dbt()` (`dagster_otel.dbt`, Issue #8): a child span per dbt node (model/
+   seed/test), keyed by the real Dagster asset_key/check_name, nested under this
+   step's own span -- no changes needed to the function body below versus the plain
+   `@traced()` version.
 
 Run with (see examples/README.md for the full walkthrough):
     DAGSTER_HOME=... OTEL_SERVICE_NAME=jaffle_shop_example \
@@ -28,14 +33,14 @@ from pathlib import Path
 from dagster import AssetExecutionContext, Definitions, logger
 from dagster_dbt import DbtCliResource, DbtProject, dbt_assets
 
-from dagster_otel import traced
+from dagster_otel.dbt import traced_dbt
 
 jaffle_shop_project = DbtProject(project_dir=Path(__file__).parent.parent / "jaffle_shop")
 jaffle_shop_project.prepare_if_dev()
 
 
 @dbt_assets(manifest=jaffle_shop_project.manifest_path)
-@traced()
+@traced_dbt()
 def jaffle_shop_dbt_assets(context: AssetExecutionContext, dbt: DbtCliResource):
     yield from dbt.cli(["build"], context=context).stream()
 

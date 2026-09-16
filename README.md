@@ -66,6 +66,20 @@ usually runs in its own process, sometimes on its own node, so trace context is
 propagated via Dagster's own run storage rather than in-process memory. See
 [docs/design.md](docs/design.md) for how, and what's verified vs. still assumed.
 
+For `@dbt_assets`, `dagster_otel.dbt.traced_dbt()` is a drop-in replacement for
+`@traced()` that additionally opens a child span per dbt node (model/seed/test),
+keyed by the real Dagster asset_key/check_name -- no changes needed to the function
+body:
+
+```python
+from dagster_otel.dbt import traced_dbt
+
+@dbt_assets(manifest=...)
+@traced_dbt()
+def my_dbt_assets(context, dbt: DbtCliResource):
+    yield from dbt.cli(["build"], context=context).stream()
+```
+
 ## Configuration
 
 Standard OTel environment variables -- nothing bespoke:

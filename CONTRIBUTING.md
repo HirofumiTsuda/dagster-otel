@@ -39,6 +39,8 @@ uv run pyright src tests
 
 `tests/` uses a fake `DagsterInstance`/context and never touches a real Dagster instance or trace backend — useful for proving this library's own logic is internally consistent, not that Dagster still behaves the way it assumes. See `docs/design.md`'s repeated theme: several real bugs here (multi-root trace collisions, `AssetMaterialization` catalog pollution, generator-vs-plain-return handling against a real `@dbt_assets` function) were only ever found by actually running against a live Dagster instance + Jaeger, never from hand-written toy fixtures alone.
 
+`docker compose up -d` starts a local Jaeger (OTLP on `localhost:4317`, UI at `http://localhost:16686`) — point `OTEL_EXPORTER_OTLP_ENDPOINT` at it and run a job with `dagster job execute` to see real spans. This is the only service in the compose file; the Dagster side is just `uv run dagster ...` on the host, not containerized.
+
 If a change touches propagation (`_propagation.py`) or executor-specific behavior, verifying it against something real is expected, not optional:
 
 - `examples/` — a real `@dbt_assets` pipeline (see its own README)

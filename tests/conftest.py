@@ -69,9 +69,10 @@ def _reset_otel_context():
 
 class FakeInstance:
     """Stands in for DagsterInstance. Backs run tags and run parentage with a plain
-    dict, the same shape dagster_otel actually reads (run.tags / run.parent_run_id) --
-    see _propagation.py's publish_trace_context/find_upstream_trace_contexts/
-    _run_id_and_ancestors, the only things that touch `context.instance`."""
+    dict, the same shape dagster_otel actually reads (run.run_id / run.tags /
+    run.parent_run_id) -- see _propagation.py's publish_trace_context/
+    find_upstream_trace_contexts/_ancestor_runs, the only things that touch
+    `context.instance`."""
 
     def __init__(self) -> None:
         self._runs: dict[str, dict[str, Any]] = {}
@@ -83,7 +84,9 @@ class FakeInstance:
         data = self._runs.get(run_id)
         if data is None:
             return None
-        return SimpleNamespace(parent_run_id=data["parent_run_id"], tags=dict(data["tags"]))
+        return SimpleNamespace(
+            run_id=run_id, parent_run_id=data["parent_run_id"], tags=dict(data["tags"])
+        )
 
     def add_run_tags(self, run_id: str, new_tags: dict[str, str]) -> None:
         self._runs[run_id]["tags"].update(new_tags)

@@ -11,8 +11,8 @@ from opentelemetry.trace import Link
 
 from dagster_otel._propagation import (
     EXTERNAL_TRACE_CONTEXT_TAG_KEY,
+    _ancestor_runs,
     _own_step_key,
-    _run_id_and_ancestors,
     _seed_run_root_context,
     _upstream_step_keys,
     carrier_to_span_context,
@@ -159,19 +159,54 @@ def test_publish_requires_an_active_span() -> None:
         raise AssertionError("expected RuntimeError")
 
 
-def test_run_id_and_ancestors_walks_parent_chain() -> None:
+def test_ancestor_runs_walks_parent_chain() -> None:
     instance = FakeInstance()
     instance.create_run("grandparent")
     instance.create_run("parent", parent_run_id="grandparent")
     instance.create_run("child", parent_run_id="parent")
     ctx = make_context(instance, "child", ["my_op"])
 
-    assert _run_id_and_ancestors(ctx) == ["child", "parent", "grandparent"]
+    assert [run.run_id for run in _ancestor_runs(ctx)] == ["child", "parent", "grandparent"]
 
 
-def test_run_id_and_ancestors_single_run_has_no_ancestors() -> None:
+def test_ancestor_runs_single_run_has_no_ancestors() -> None:
     ctx = make_context(FakeInstance(), "run-1", ["my_op"])
-    assert _run_id_and_ancestors(ctx) == ["run-1"]
+    assert [run.run_id for run in _ancestor_runs(ctx)] == ["run-1"]
+
+
+def test_ancestor_runs_fetched_once_when_shared_across_lookups() -> None:
+    """Issue #35: a caller doing several lookups for the same step (as
+    _traced_span() does) should fetch the ancestor chain once and pass it through,
+    not let each lookup independently re-walk/re-fetch run storage."""
+    instance = FakeInstance()
+    instance.create_run("original")
+    instance.create_run("retry", parent_run_id="original")
+
+    calls = 0
+    real_get_run_by_id = instance.get_run_by_id
+
+    def counting_get_run_by_id(run_id: str):
+        nonlocal calls
+        calls += 1
+        return real_get_run_by_id(run_id)
+
+    instance.get_run_by_id = counting_get_run_by_id  # type: ignore[method-assign]
+
+    root_ctx = make_context(instance, "original", ["root_op"])
+    with trace.get_tracer("test").start_as_current_span("root"):
+        publish_trace_context(root_ctx)
+
+    retry_ctx = make_context(instance, "retry", ["child_op"], deps=["root_op"], retry_number=1)
+    calls = 0  # only count what happens from here on -- make_context() itself does a
+    # get_run_by_id() check to decide whether to auto-create the run.
+    runs = _ancestor_runs(retry_ctx)
+    assert calls == 2  # "retry" then "original" -- exactly the chain, fetched once
+
+    calls = 0
+    find_upstream_trace_contexts(retry_ctx, runs)
+    find_external_trace_context(retry_ctx, runs)
+    find_previous_attempt_context(retry_ctx, runs)
+    assert calls == 0  # every lookup reused the passed-in runs, no further fetches
 
 
 def test_find_upstream_trace_contexts_falls_back_to_ancestor_run() -> None:

@@ -99,6 +99,7 @@ def make_context(
     deps: list[str] | None = None,
     job_name: str = "test_job",
     retry_number: int = 0,
+    step_key: str | None = None,
 ) -> ExecutionContext:
     """A fake op/asset execution context with just enough surface for dagster_otel:
     op_handle.path, run_id, job_name, retry_number, instance, log_event (unused since
@@ -106,10 +107,10 @@ def make_context(
     context.log is a genuine logging.Logger subclass in real Dagster too, see
     _logging.py's module docstring, so using a plain one here matches the real shape
     rather than faking it), and get_step_execution_context().step.step_inputs[*].
-    dependency_keys -- the same public method (see _propagation.py's
-    _upstream_step_keys docstring) real Dagster defines identically on both
-    OpExecutionContext and AssetExecutionContext, so this fake doesn't need to model
-    the two context shapes differently either.
+    dependency_keys / .step.key -- the same public method (see _propagation.py's
+    _upstream_step_keys/_own_step_key docstrings) real Dagster defines identically on
+    both OpExecutionContext and AssetExecutionContext, so this fake doesn't need to
+    model the two context shapes differently either.
 
     :param deps: step_keys this step directly depends on, matching real Dagster's
         `StepInput.dependency_keys` -- e.g. `deps=["root_op"]` for a step whose only
@@ -119,11 +120,17 @@ def make_context(
     :param retry_number: matches real Dagster's `context.retry_number` (0 for the
         first attempt) -- only meaningful for tests asserting on the
         `dagster.retry_number` span attribute.
+    :param step_key: matches real Dagster's `ExecutionStep.key` -- defaults to
+        `".".join(op_path)`, the same value a non-mapped step's real `step.key`
+        resolves to (verified in Issue #45). Pass a `"op_name[mapping_key]"`-shaped
+        string to simulate a dynamic-mapped step, where this diverges from `op_path`.
     """
     if instance.get_run_by_id(run_id) is None:
         instance.create_run(run_id)
     step_inputs = [SimpleNamespace(dependency_keys={dep}) for dep in (deps or [])]
-    step_execution_context = SimpleNamespace(step=SimpleNamespace(step_inputs=step_inputs))
+    step_execution_context = SimpleNamespace(
+        step=SimpleNamespace(step_inputs=step_inputs, key=step_key or ".".join(op_path))
+    )
     return SimpleNamespace(  # type: ignore[return-value]
         op_handle=SimpleNamespace(path=op_path),
         run_id=run_id,

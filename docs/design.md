@@ -811,6 +811,48 @@ that calls these directly without a `runs` argument -- working unmodified; only
 `_traced_span`, which actually has several lookups to share the fetch across, passes
 `runs` through explicitly.
 
+## Dynamic-mapped steps: `_own_step_key` must use the real step key (Issue #45, 2026-09-16)
+
+`_own_step_key` used `".".join(context.op_handle.path)` -- correct for an ordinary
+step, but a step produced by Dagster's dynamic graph mapping (`DynamicOut`/`.map()`)
+has a real execution-plan key shaped `f"{node_handle}[{mapping_key}]"`
+(`StepHandle.parse_from_key`'s own regex, confirmed by reading Dagster's source),
+which `op_handle` never carries at all. Every parallel invocation of one mapped op
+therefore computed the identical `_own_step_key`, so `publish_trace_context` had `N`
+concurrent instances racing to overwrite the same run tag, and a downstream
+`.collect()` step's real `dependency_keys` (which *do* include `[mapping_key]`) could
+never match what got published under the bracket-less key -- the same "looks fine,
+silently wrong" shape as the original Issue #5 bug, reintroduced through a different
+code path that keying-by-`dependency_keys` didn't close, since the *publishing* side
+(not the upstream-lookup side) was still keying by `op_handle.path`.
+
+Fixed by using `context.get_step_execution_context().step.key`
+(`ExecutionStep.key` / `StepHandle.to_key()`) instead. Confirmed by reading Dagster's
+own source (not assumed) that this is behavior-preserving for the ordinary case --
+`StepHandle.key` defaults to `str(node_handle)`, and `NodeHandle.__str__` builds
+`".".join(path components)` the same way `.path` does -- while producing the real
+`[mapping_key]`-suffixed string for a mapped step, matching exactly what
+`StepInput.dependency_keys` already returns for a downstream dependency on one.
+
+Verified against a real multiprocess job (`fan_out` -> `DynamicOut` -> `.map
+(process_file)` -> `.collect()` -> `collect_results`, all `@traced()`) + real
+Jaeger:
+
+```
+fan_out                 CHILD_OF 0000000000000001   (deterministic-seed root)
+process_file[a]          CHILD_OF fan_out
+process_file[b]          CHILD_OF fan_out
+process_file[c]          CHILD_OF fan_out
+collect_results          CHILD_OF process_file[a], FOLLOWS_FROM process_file[b],
+                          FOLLOWS_FROM process_file[c]
+```
+
+`collect_results` found all three real mapped-instance parents (one primary + two
+`Link`s, the same fan-in mechanism Issue #5 built) -- before the fix, all three
+`process_file` instances would have raced on the single key `"process_file"`, and
+`collect_results`'s lookups for `"process_file[a]"`/`"[b]"`/`"[c]"` would never have
+matched it, silently falling back to a fresh disconnected root instead.
+
 ## Open questions
 
 None currently tracked -- multi-root/fan-in (#5), k8s_job_executor (#3), and

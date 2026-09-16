@@ -28,6 +28,50 @@ def test_own_step_key_is_dotted_op_path() -> None:
     assert _own_step_key(ctx) == "outer.inner.my_op"
 
 
+def test_own_step_key_uses_real_step_key_for_dynamic_mapping() -> None:
+    """Issue #45: a dynamic-mapped step's real key includes `[mapping_key]`, which
+    `op_handle.path` never carries -- `_own_step_key` must use the real
+    `ExecutionStep.key` (here, the fake context's `step_key` param), not reconstruct
+    one from `op_path`."""
+    ctx = make_context(
+        FakeInstance(), "run-1", ["process_file"], step_key="process_file[a.txt]"
+    )
+    assert _own_step_key(ctx) == "process_file[a.txt]"
+
+
+def test_find_upstream_trace_contexts_distinguishes_parallel_mapped_instances() -> None:
+    """The actual bug Issue #45 fixes: before, every parallel invocation of one
+    mapped op collapsed to the identical `op_handle.path`-based key and raced to
+    overwrite the same run tag. Two mapped instances now publish under distinct
+    real step keys, so a downstream step depending on one specific instance finds
+    exactly that one -- not whichever instance happened to publish last."""
+    instance = FakeInstance()
+
+    instance_a = make_context(
+        instance, "run-1", ["process_file"], step_key="process_file[a.txt]"
+    )
+    with trace.get_tracer("test").start_as_current_span("process_file[a.txt]"):
+        publish_trace_context(instance_a)
+        trace_id_a = trace.get_current_span().get_span_context().trace_id
+
+    instance_b = make_context(
+        instance, "run-1", ["process_file"], step_key="process_file[b.txt]"
+    )
+    with trace.get_tracer("test").start_as_current_span("process_file[b.txt]"):
+        publish_trace_context(instance_b)
+
+    assert trace_id_a != trace.get_current_span().get_span_context().trace_id
+
+    # A downstream step depending on exactly one mapped instance (the real
+    # dependency_keys shape, "op_name[mapping_key]") must find only that instance.
+    collect_ctx = make_context(
+        instance, "run-1", ["collect_op"], deps=["process_file[a.txt]"]
+    )
+    found = find_upstream_trace_contexts(collect_ctx)
+    assert len(found) == 1
+    assert format(trace_id_a, "032x") in found[0]["traceparent"]
+
+
 def test_upstream_step_keys_empty_for_no_deps() -> None:
     ctx = make_context(FakeInstance(), "run-1", ["root_op"])
     assert _upstream_step_keys(ctx) == frozenset()

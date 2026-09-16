@@ -62,6 +62,7 @@ from dagster_otel._propagation import (
     _own_step_key,
     _seed_run_root_context,
     carrier_to_span_context,
+    find_previous_attempt_context,
     find_upstream_trace_contexts,
     publish_trace_context,
 )
@@ -133,6 +134,18 @@ def _traced_span(context: ExecutionContext, name: str) -> Generator[None, None, 
         # find a real parent.
         _seed_run_root_context(context)
         links = []
+
+    # Issue #14: an op-level RetryPolicy retry re-executes the same step as a fresh
+    # process/span, with no relationship to the failed (or otherwise-retried)
+    # previous attempt otherwise -- confirmed against a real retry: two genuinely
+    # unrelated sibling spans, distinguishable only by the dagster.retry_number
+    # attribute (see #9), not by trace structure. This doesn't change who the real
+    # parent is (still the step's actual upstream dependency, or the deterministic
+    # root seed) -- it adds a Link to the previous attempt alongside that, the same
+    # primitive already used for fan-in.
+    previous_attempt_context = find_previous_attempt_context(context)
+    if previous_attempt_context is not None:
+        links = [*links, Link(carrier_to_span_context(previous_attempt_context))]
 
     log_filter = TraceContextFilter()
     # context.log alone misses log lines integrations emit on their own behalf --

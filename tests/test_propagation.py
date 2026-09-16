@@ -13,6 +13,7 @@ from dagster_otel._propagation import (
     _seed_run_root_context,
     _upstream_step_keys,
     carrier_to_span_context,
+    find_previous_attempt_context,
     find_upstream_trace_contexts,
     publish_trace_context,
 )
@@ -201,3 +202,31 @@ def test_seed_run_root_context_is_deterministic_per_run() -> None:
 
     assert trace_id_a1 == trace_id_a2  # same run_id -> same trace_id, no coordination
     assert trace_id_a1 != trace_id_b  # different run_id -> different trace_id
+
+
+def test_find_previous_attempt_context_none_on_first_attempt() -> None:
+    """retry_number=0 (the default) is the first attempt -- nothing preceded it."""
+    ctx = make_context(FakeInstance(), "run-1", ["my_op"], retry_number=0)
+    assert find_previous_attempt_context(ctx) is None
+
+
+def test_find_previous_attempt_context_none_when_first_attempt_never_published() -> None:
+    """A retry looked up before the first attempt ever published anything (shouldn't
+    happen given Dagster's own execution order, but treated as "not found," not an
+    error, same as every other lookup in this module)."""
+    ctx = make_context(FakeInstance(), "run-1", ["my_op"], retry_number=1)
+    assert find_previous_attempt_context(ctx) is None
+
+
+def test_find_previous_attempt_context_finds_the_prior_attempt() -> None:
+    instance = FakeInstance()
+
+    first_attempt_ctx = make_context(instance, "run-1", ["my_op"], retry_number=0)
+    with trace.get_tracer("test").start_as_current_span("attempt-0"):
+        publish_trace_context(first_attempt_ctx)
+        first_trace_id = trace.get_current_span().get_span_context().trace_id
+
+    retry_ctx = make_context(instance, "run-1", ["my_op"], retry_number=1)
+    found = find_previous_attempt_context(retry_ctx)
+    assert found is not None
+    assert format(first_trace_id, "032x") in found["traceparent"]

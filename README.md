@@ -73,13 +73,20 @@ Standard OTel environment variables -- nothing bespoke:
 | Variable | Purpose |
 | --- | --- |
 | `OTEL_SERVICE_NAME` | Names your service in the trace backend. |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` (or `..._TRACES_ENDPOINT`) | Where to send spans (e.g. `http://localhost:4317`). |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` (or `..._TRACES_ENDPOINT`) | Where to send spans (e.g. `http://localhost:4317`). Required -- without one of these set, no real exporter is attached at all (see below). |
 | `OTEL_EXPORTER_OTLP_TRACES_TIMEOUT` / `..._TIMEOUT` | Per-export timeout. Set this yourself if the default (2s) doesn't fit -- see [docs/design.md](docs/design.md) for why a default exists at all (an unreachable collector otherwise blocked every step for ~7s). |
+| `OTEL_SDK_DISABLED` | Set to `true` to force no export regardless of the endpoint vars above. |
 
 `@traced()` reads these itself (idempotently) the first time it runs in a process --
 there's nothing else to wire up, no `@resource`/`required_resource_keys` needed. Call
 `configure()` yourself only if you want configuration to happen eagerly (e.g. at
 `Definitions` load time) rather than lazily on first use.
+
+Without `OTEL_EXPORTER_OTLP_ENDPOINT`/`..._TRACES_ENDPOINT` set, no real OTLP exporter
+is created at all -- spans are still created (propagation and log correlation keep
+working), just never sent anywhere, so trying `@traced()` with zero setup never makes
+a surprise network call. See [docs/design.md](docs/design.md) for the one deliberate
+tradeoff this makes.
 
 ## Compatibility
 

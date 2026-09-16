@@ -591,6 +591,47 @@ Issue #14 (the two attempts are still unrelated sibling spans, no `Link` between
 them) but does make them distinguishable from each other by attribute, which is a
 real partial improvement toward that issue even before it's fully addressed.
 
+## No real exporter installed unless export is actually configured (Issue #16, 2026-09-16)
+
+Found while comparing against Prefect's OTel docs, which describe OTel calls staying
+a true no-op ("very performant, no overhead") until the user configures something.
+`configure()` didn't do that: confirmed `OTLPSpanExporter()` defaults to
+`localhost:4317` even with **zero** `OTEL_*` env vars set, so `configure()` built a
+real `TracerProvider` + `OTLPSpanExporter` + `SimpleSpanProcessor` regardless --
+someone who `pip install`s this and tries `@traced()` with no setup at all got a real
+gRPC connection attempt on every single step, forever, for a collector they never
+asked for (bounded to ~2s per step by the existing timeout fix above, but still a
+real, silent, avoidable cost).
+
+Fixed by gating whether a real exporter gets attached at all
+(`_export_configured()`): `OTEL_SDK_DISABLED=true` (the spec's own kill switch) always
+wins; otherwise gated on `OTEL_EXPORTER_OTLP_ENDPOINT`/`..._TRACES_ENDPOINT`
+presence. When neither signal says "export somewhere," `configure()` still installs a
+`TracerProvider` (so `traced()`'s propagation logic keeps working unmodified -- every
+invariant it relies on, like `publish_trace_context`'s span_id check, only depends on
+whether a span was *created*, not whether it was ever *exported*) but attaches no span
+processor at all. Verified directly: a bare `TracerProvider` with zero span
+processors still produces genuinely valid, recording spans with real non-zero
+`span_id`/`trace_id` -- nothing about span creation or cross-process propagation
+changes, only whether anything ever tries to *send* a span anywhere.
+
+Known, deliberately-not-solved tradeoff: someone running a real OTel Collector as a
+sidecar at the literal default `localhost:4317`, relying on the SDK's own built-in
+default instead of setting the endpoint env var explicitly, now gets silent
+no-export instead of real export. Chose the safer default of the two failure modes --
+a surprise network stall on every step for a brand-new user vs. a one-line env var
+for a more deliberate deployment (already standard OTel advice: set the endpoint
+explicitly) -- rather than trying to detect that narrower case.
+
+Verified against real Dagster, with Jaeger deliberately stopped to test against a
+genuinely unreachable default endpoint, not just an untested one:
+
+| Env vars | Jaeger running? | Per-step time |
+| --- | --- | --- |
+| none | down | 93ms / 151ms -- no network attempt |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` set | down | 1.0s / 1.2s -- real export attempted, bounded by the existing 2s timeout |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` set | up | 107ms / 161ms, spans correctly received in Jaeger -- the happy path still works unmodified |
+
 ## Open questions
 
 None currently tracked -- multi-root/fan-in (#5), k8s_job_executor (#3), and

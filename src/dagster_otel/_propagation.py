@@ -185,6 +185,31 @@ def find_upstream_trace_contexts(context: ExecutionContext) -> list[dict[str, st
     ]
 
 
+def find_previous_attempt_context(context: ExecutionContext) -> dict[str, str] | None:
+    """The trace context this same step published on a previous attempt, if this is
+    an op-level `RetryPolicy` retry (`context.retry_number > 0`) and that attempt
+    actually published one (Issue #14).
+
+    Looked up *before* this attempt's own `publish_trace_context()` call overwrites
+    it: a RetryPolicy-triggered retry re-executes the same step as a fresh process
+    (confirmed against a real retry), but publishes under the exact same
+    `_own_step_key(context)` as every other attempt of it -- there's nothing else to
+    disambiguate attempts by in the tag key itself. Whatever's currently there when a
+    later attempt starts is necessarily the immediately-preceding attempt's publish,
+    since every attempt (successful or not -- publish happens before the wrapped
+    function body runs, so even a subsequently-failing attempt still publishes)
+    overwrites the same key in order.
+
+    None for the first attempt (nothing preceded it) or if the previous attempt never
+    published (untraced, or Dagster's execution order not guaranteeing what this
+    assumes -- not asserted against here, treated as "no relationship found" like
+    every other lookup in this module).
+    """
+    if context.retry_number == 0:
+        return None
+    return _find_context_for_step_key(context, _own_step_key(context))
+
+
 def _activate_trace_context(carrier: dict[str, str]) -> None:
     """Make a previously-published trace context the active one in this process.
 

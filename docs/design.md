@@ -586,10 +586,10 @@ Tracked as a follow-up, not done half-right here.
 Verified against real Dagster + Jaeger, including a `RetryPolicy`-triggered
 same-run retry (see Issue #14): both the failed first attempt and the successful
 retry carried the correct, distinct `dagster.retry_number` (`0` then `1`), alongside
-identical `dagster.run_id`/`dagster.job_name`/`dagster.step_key`. This doesn't fix
-Issue #14 (the two attempts are still unrelated sibling spans, no `Link` between
-them) but does make them distinguishable from each other by attribute, which is a
-real partial improvement toward that issue even before it's fully addressed.
+identical `dagster.run_id`/`dagster.job_name`/`dagster.step_key`. At the time this
+was written, the two attempts were still unrelated sibling spans with no `Link`
+between them -- distinguishable by attribute, not yet by trace structure. Issue #14
+(below) later closed that second gap.
 
 ## No real exporter installed unless export is actually configured (Issue #16, 2026-09-16)
 
@@ -631,6 +631,39 @@ genuinely unreachable default endpoint, not just an untested one:
 | none | down | 93ms / 151ms -- no network attempt |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` set | down | 1.0s / 1.2s -- real export attempted, bounded by the existing 2s timeout |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` set | up | 107ms / 161ms, spans correctly received in Jaeger -- the happy path still works unmodified |
+
+## RetryPolicy attempts linked to each other (Issue #14, 2026-09-16)
+
+An op-level `RetryPolicy` retry re-executes the same step as a fresh process, with
+its own fresh `_traced_span` call -- confirmed (#9) each attempt gets a genuinely
+separate span, distinguishable only by the `dagster.retry_number` attribute, with no
+relationship to the previous attempt in the trace structure itself.
+
+Fixed by reusing the exact mechanism already built for fan-in (#5): every attempt
+publishes its trace context under the identical `_own_step_key(context)` -- the same
+key every attempt of a given step uses, since a retry isn't a new step, it's the same
+one running again. That means a later attempt can look its *own* key up (via the same
+`_find_context_for_step_key` fan-in already uses) *before* publishing its own context
+over it, and find exactly the immediately-preceding attempt's context --
+`find_previous_attempt_context`, gated on `context.retry_number > 0` so a first
+attempt (nothing preceded it) is skipped. Whatever's found becomes an additional
+`Link`, alongside (not replacing) whatever `Link`s/parent the step's real upstream
+dependencies already produce -- the retry relationship is additive information, not a
+substitute for the real dependency-graph parent.
+
+Verified against a real `RetryPolicy`-triggered retry (`root_op -> flaky_op`,
+`flaky_op` failing once and succeeding on retry) against real Dagster + Jaeger:
+
+```
+root_op           CHILD_OF <root>
+flaky_op (try 0)  CHILD_OF root_op
+flaky_op (try 1)  CHILD_OF root_op, FOLLOWS_FROM flaky_op (try 0)
+```
+
+Both attempts correctly keep `root_op` as their real parent (the actual dependency
+relationship, unchanged by any of this); the retry additionally links back to the
+attempt it retried. A viewer can now see both facts from the trace alone: what this
+step actually depends on, and that it needed a retry to succeed.
 
 ## Open questions
 

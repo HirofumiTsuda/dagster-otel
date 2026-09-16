@@ -268,3 +268,35 @@ def test_traced_sets_dagster_context_span_attributes(spans) -> None:
     assert span.attributes["dagster.job_name"] == "my_job"
     assert span.attributes["dagster.step_key"] == "outer.my_op"
     assert span.attributes["dagster.retry_number"] == 2
+
+
+def test_traced_retry_gets_link_to_previous_attempt(spans) -> None:
+    """Issue #14: a RetryPolicy-triggered retry's span should carry a Link back to
+    the previous attempt's span, even though the real parent (here: none, a root)
+    stays whatever it actually is -- the retry relationship is additive, not a
+    replacement for the real dependency-graph parent."""
+    instance = FakeInstance()
+
+    @traced()
+    def flaky_op(context) -> None:
+        pass
+
+    first_attempt_ctx = make_context(instance, "run-1", ["flaky_op"], retry_number=0)
+    flaky_op(first_attempt_ctx)
+
+    retry_ctx = make_context(instance, "run-1", ["flaky_op"], retry_number=1)
+    flaky_op(retry_ctx)
+
+    finished = spans.get_finished_spans()
+    assert len(finished) == 2
+    first_span, retry_span = finished
+
+    # Both attempts are still roots (no real upstream dependency here) -- the retry
+    # relationship doesn't change who the real parent is.
+    assert retry_span.parent is None or retry_span.parent.span_id == 0x1
+
+    # But the retry carries a Link back to the first attempt's span specifically.
+    assert len(retry_span.links) == 1
+    assert retry_span.links[0].context.span_id == first_span.context.span_id
+    # And the first attempt itself has no such link -- nothing preceded it.
+    assert len(first_span.links) == 0

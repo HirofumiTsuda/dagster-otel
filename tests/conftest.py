@@ -10,6 +10,7 @@ behaves the way this library assumes it does -- that needs a real instance
 (verify-tracing/verify-dagster-version-compat skills), which these tests don't
 replace.
 """
+
 import logging
 from types import SimpleNamespace
 from typing import Any

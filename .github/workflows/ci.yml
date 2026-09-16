@@ -30,6 +30,14 @@ jobs:
       # directly in CI rather than adding it to the project's own dependencies.
       - run: uvx ruff@0.16.7 check .
 
+      # Repo-wide formatting adopted in Issue #51 -- --check fails (nonzero exit,
+      # diff to stderr) without writing anything, so this catches drift instead of
+      # silently reformatting on every PR. Markdown excluded (pyproject.toml's
+      # `extend-exclude`) since ruff format rewrites embedded Python snippets too,
+      # which flattened deliberately hand-aligned example code in
+      # README.md/docs/design.md -- those are teaching examples, not shipped code.
+      - run: uvx ruff@0.16.7 format --check .
+
       # mypy/pyright ARE pinned via [dependency-groups].lint in pyproject.toml (not
       # ad-hoc `uvx <tool>@version` like ruff above) so the exact same pinned versions
       # get used locally too via `uv sync --group lint` -- see that group's comment

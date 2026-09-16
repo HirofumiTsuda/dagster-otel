@@ -30,6 +30,7 @@ mypy/pyright are pinned exactly in `pyproject.toml`'s `[dependency-groups].lint`
 ```sh
 uv run pytest
 uvx ruff@0.16.7 check .
+uvx ruff@0.16.7 format --check .   # drop --check (just `format .`) to fix in place
 uv run mypy -p dagster_otel --explicit-package-bases
 uv run mypy --explicit-package-bases tests/
 uv run pyright src tests

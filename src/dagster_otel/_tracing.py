@@ -46,6 +46,7 @@ function object and `span_name or func.__name__` degrades into "the function is
 already truthy" territory downstream. A footgun worth a real fix, not a docs note,
 given `@op`/`@asset` train users to expect bare use directly above this decorator.
 """
+
 import inspect
 from collections.abc import Callable, Generator
 from contextlib import contextmanager

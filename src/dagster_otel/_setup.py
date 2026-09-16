@@ -14,6 +14,7 @@ the first place, and this module's whole point is deferring to env vars rather t
 building a parallel config surface. Set OTEL_SERVICE_NAME / OTEL_EXPORTER_OTLP_ENDPOINT
 (or OTEL_EXPORTER_OTLP_TRACES_ENDPOINT) instead of passing values here.
 """
+
 import os
 
 from opentelemetry import trace

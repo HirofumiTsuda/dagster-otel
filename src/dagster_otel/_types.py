@@ -7,6 +7,7 @@ delegating the properties/methods this library uses (`.log`, `.op_handle`, `.ins
 `.log_event`, `.run_id`) rather than inheriting them. There's no common base class to
 type against instead, so every function here that accepts either takes this Union.
 """
+
 from dagster import AssetExecutionContext, OpExecutionContext
 
 ExecutionContext = OpExecutionContext | AssetExecutionContext

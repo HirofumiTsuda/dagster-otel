@@ -77,7 +77,9 @@ a genuine root: every step derives the same trace_id deterministically from
 
 import hashlib
 import json
+from collections.abc import Sequence
 
+from dagster import DagsterRun
 from opentelemetry import context as otel_context
 from opentelemetry import trace
 from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
@@ -99,23 +101,34 @@ _TAG_PREFIX = "dagster_otel/trace_context/"
 EXTERNAL_TRACE_CONTEXT_TAG_KEY = "dagster_otel/external_trace_context"
 
 
-def _run_id_and_ancestors(context: ExecutionContext) -> list[str]:
-    """The current run's ID, then any ancestor run IDs (oldest last).
+def _ancestor_runs(context: ExecutionContext) -> list[DagsterRun]:
+    """The current run, then any ancestor runs (oldest last), each fetched from run
+    storage exactly once.
 
     A retry-from-failure creates a new run whose `parent_run_id` points at the run it
     retried, and may re-execute only a subset of steps. If the retried run doesn't
     re-run the step that published the trace context, it's only findable by walking
     up to the parent run's event log.
+
+    Callers that need to check several things against "this run, and (for retries)
+    where it came from" -- find_upstream_trace_contexts, find_external_trace_context,
+    find_previous_attempt_context all do -- should call this once and pass the result
+    to each, rather than letting each independently re-walk and re-fetch the same
+    chain (Issue #35: a fan-in step with U upstreams on a run with N ancestor hops
+    was doing on the order of `(U + 1) * 2N` `get_run_by_id` calls where `N` suffices,
+    since the original version of this walk fetched every run just to read
+    `parent_run_id`, then discarded it, leaving every caller to fetch the same runs
+    again to read `.tags`).
     """
-    run_id = context.run_id
-    run_ids = [run_id]
-    while True:
+    runs: list[DagsterRun] = []
+    run_id: str | None = context.run_id
+    while run_id is not None:
         run = context.instance.get_run_by_id(run_id)
-        if not run or not run.parent_run_id:
+        if run is None:
             break
+        runs.append(run)
         run_id = run.parent_run_id
-        run_ids.append(run_id)
-    return run_ids
+    return runs
 
 
 def _own_step_key(context: ExecutionContext) -> str:
@@ -160,14 +173,13 @@ def publish_trace_context(context: ExecutionContext) -> None:
     context.instance.add_run_tags(context.run_id, {tag_key: json.dumps(carrier)})
 
 
-def _find_context_for_step_key(context: ExecutionContext, step_key: str) -> dict[str, str] | None:
-    """The trace context a specific step published, if any -- searching this run and
-    (for retry-from-failure) ancestor runs."""
+def _find_context_for_step_key(
+    runs: Sequence[DagsterRun], step_key: str
+) -> dict[str, str] | None:
+    """The trace context a specific step published, if any -- searching the given
+    runs (see _ancestor_runs) in order."""
     tag_key = _TAG_PREFIX + step_key
-    for run_id in _run_id_and_ancestors(context):
-        run = context.instance.get_run_by_id(run_id)
-        if run is None:
-            continue
+    for run in runs:
         tag_value = run.tags.get(tag_key)
         if tag_value is not None:
             result: dict[str, str] = json.loads(tag_value)
@@ -175,7 +187,9 @@ def _find_context_for_step_key(context: ExecutionContext, step_key: str) -> dict
     return None
 
 
-def find_upstream_trace_contexts(context: ExecutionContext) -> list[dict[str, str]]:
+def find_upstream_trace_contexts(
+    context: ExecutionContext, runs: Sequence[DagsterRun] | None = None
+) -> list[dict[str, str]]:
     """The trace contexts of this step's real, direct upstream dependencies that have
     themselves published one -- in deterministic (sorted step_key) order, so which one
     `_tracing.py` treats as the real parent (vs. a Link, for fan-in) is stable rather
@@ -186,15 +200,24 @@ def find_upstream_trace_contexts(context: ExecutionContext) -> list[dict[str, st
     given Dagster's own execution order, but not asserted against here -- looked up
     before an upstream has run). Callers should treat empty the same as "no parent
     found," not an error.
+
+    :param runs: This run and its ancestors (see `_ancestor_runs`), if the caller
+        already fetched them for another lookup in the same step -- computed here if
+        not given. `_tracing.py` passes this through explicitly so one step's worth
+        of `_traced_span()` calls this exactly once, not once per lookup (Issue #35).
     """
+    if runs is None:
+        runs = _ancestor_runs(context)
     return [
         carrier
         for key in sorted(_upstream_step_keys(context))
-        if (carrier := _find_context_for_step_key(context, key)) is not None
+        if (carrier := _find_context_for_step_key(runs, key)) is not None
     ]
 
 
-def find_external_trace_context(context: ExecutionContext) -> dict[str, str] | None:
+def find_external_trace_context(
+    context: ExecutionContext, runs: Sequence[DagsterRun] | None = None
+) -> dict[str, str] | None:
     """The trace context an external caller published before/while triggering this
     run, if any (Issue #13) -- e.g. a CI/CD pipeline or another OTel-instrumented
     system that wants this whole run's trace nested under its own, not starting a
@@ -208,7 +231,7 @@ def find_external_trace_context(context: ExecutionContext) -> dict[str, str] | N
     from `context.instance.get_run_by_id(context.run_id).tags` by the time any step
     starts -- the same read path every other propagation lookup here already uses.
 
-    Walks `_run_id_and_ancestors`, same as `_find_context_for_step_key` -- checked
+    Walks the same ancestor-run chain as `_find_context_for_step_key` -- checked
     directly against a real retry-from-failure run (2026-09-15) that Dagster does
     *not* copy a run's tags forward to a retry by default (confirmed: a custom tag
     set on the original run was simply absent from `instance.get_run_by_id(retry_run_id)
@@ -217,11 +240,13 @@ def find_external_trace_context(context: ExecutionContext) -> dict[str, str] | N
     launch was seeded with -- without it, only the original run's own root steps
     would ever see the external context, and a retry would silently fall back to the
     deterministic run_id seed instead.
+
+    :param runs: See `find_upstream_trace_contexts`'s `runs` parameter -- same
+        share-the-fetch purpose.
     """
-    for run_id in _run_id_and_ancestors(context):
-        run = context.instance.get_run_by_id(run_id)
-        if run is None:
-            continue
+    if runs is None:
+        runs = _ancestor_runs(context)
+    for run in runs:
         tag_value = run.tags.get(EXTERNAL_TRACE_CONTEXT_TAG_KEY)
         if tag_value is not None:
             result: dict[str, str] = json.loads(tag_value)
@@ -229,7 +254,9 @@ def find_external_trace_context(context: ExecutionContext) -> dict[str, str] | N
     return None
 
 
-def find_previous_attempt_context(context: ExecutionContext) -> dict[str, str] | None:
+def find_previous_attempt_context(
+    context: ExecutionContext, runs: Sequence[DagsterRun] | None = None
+) -> dict[str, str] | None:
     """The trace context this same step published on a previous attempt, if this is
     an op-level `RetryPolicy` retry (`context.retry_number > 0`) and that attempt
     actually published one (Issue #14).
@@ -248,10 +275,16 @@ def find_previous_attempt_context(context: ExecutionContext) -> dict[str, str] |
     published (untraced, or Dagster's execution order not guaranteeing what this
     assumes -- not asserted against here, treated as "no relationship found" like
     every other lookup in this module).
+
+    :param runs: See `find_upstream_trace_contexts`'s `runs` parameter -- same
+        share-the-fetch purpose. Not fetched at all when `context.retry_number == 0`,
+        since nothing here is looked up in that case anyway.
     """
     if context.retry_number == 0:
         return None
-    return _find_context_for_step_key(context, _own_step_key(context))
+    if runs is None:
+        runs = _ancestor_runs(context)
+    return _find_context_for_step_key(runs, _own_step_key(context))
 
 
 def _activate_trace_context(carrier: dict[str, str]) -> None:

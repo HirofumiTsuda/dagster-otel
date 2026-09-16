@@ -500,7 +500,7 @@ against its own regressions), but rerunnable by hand if `dagster`/`dagster-k8s`/
 ## Verified against a real retry-from-failure run (Issue #4, 2026-09-15)
 
 Confirmed by direct testing, not just the fake-instance unit tests
-(`test_run_id_and_ancestors_walks_parent_chain`,
+(`test_ancestor_runs_walks_parent_chain`,
 `test_find_trace_context_falls_back_to_ancestor_run`): a two-step job (`root_op` ->
 `failing_op`, both `@traced()`), `failing_op` deliberately failing on its first
 attempt (gated by a marker file) and succeeding on a second, executed via Dagster's
@@ -514,7 +514,7 @@ the retry run's own event log shows only `failing_op` ever started. That matters
 because it means `failing_op`'s `@traced()` call in the retry run *cannot* find a
 trace context published within its own run -- `root_op`'s `publish_trace_context`
 call only ever happened in the original run's process, which is exactly the case
-`_run_id_and_ancestors` (walking `parent_run_id`) exists for.
+`_ancestor_runs` (walking `parent_run_id`) exists for.
 
 Jaeger confirmed all three spans across both runs landed in one trace, correctly
 nested:
@@ -528,7 +528,7 @@ failing_op (attempt 2) CHILD_OF root_op              (retry run, parent_run_id =
 Both `failing_op` spans -- the failed first attempt *and* the successful retry, two
 different Dagster runs, two different processes, no shared memory -- correctly
 parented under `root_op`'s span from the original run. `retry_run.parent_run_id`
-matched the original run's ID exactly as `_run_id_and_ancestors` assumes.
+matched the original run's ID exactly as `_ancestor_runs` assumes.
 
 ## Bare `@traced` support, matching `@op`/`@asset` (Issue #19, 2026-09-16)
 
@@ -762,7 +762,7 @@ does not copy a run's tags forward to a retry-from-failure run** -- confirmed
 directly (`execute_job(tags={"custom": "value"})` then
 `ReexecutionOptions.from_failure(...)`: the retry run's own tags came back `{}`,
 completely empty). So `find_external_trace_context`, like every other cross-run
-lookup here, has to walk `_run_id_and_ancestors` rather than checking only the
+lookup here, has to walk the ancestor-run chain (`_ancestor_runs`) rather than checking only the
 current run's own tags -- without that, a retried run's root steps would silently
 fall back to the deterministic seed instead of still nesting under the original
 external caller.
@@ -787,6 +787,29 @@ standalone probe that skipped `@traced()`/`configure()` entirely) silently no-op
 span creation, `span.parent` came back `None` even though the tag lookup itself
 worked correctly. Not a gap in the actual design, a reminder this only works because
 `@traced()` already calls `configure()` itself every time.
+
+## Ancestor-run chain fetched once per step, not once per lookup (Issue #35, 2026-09-16)
+
+`_ancestor_runs(context)` (formerly `_run_id_and_ancestors`, which returned only run
+ids) walks the retry-from-failure `parent_run_id` chain and fetches each `DagsterRun`
+from run storage exactly once now, returning the run objects themselves rather than
+discarding them and making every caller re-fetch. `find_upstream_trace_contexts`,
+`find_external_trace_context`, and `find_previous_attempt_context` all take an
+optional `runs` parameter -- `_traced_span` (`_tracing.py`) fetches `_ancestor_runs`
+once per step and passes the same list into all three, instead of each independently
+re-walking and re-fetching the identical chain.
+
+Not a correctness fix -- purely redundant round-trips to run storage. Before this,
+a single `_traced_span()` call with U real upstream dependencies on a run with N
+ancestor hops (a retry chain) issued on the order of `(U + 1) * 2N` `get_run_by_id`
+calls where `N` suffices: `find_upstream_trace_contexts` alone re-walked and
+re-fetched the whole chain once per upstream key, on top of the chain already being
+fetched twice per walk (once to discover `parent_run_id`, discarded; once more by
+each caller to read `.tags`). Every function's own default (`runs=None` recomputes
+internally via `_ancestor_runs`) keeps every existing call site -- and every test
+that calls these directly without a `runs` argument -- working unmodified; only
+`_traced_span`, which actually has several lookups to share the fetch across, passes
+`runs` through explicitly.
 
 ## Open questions
 

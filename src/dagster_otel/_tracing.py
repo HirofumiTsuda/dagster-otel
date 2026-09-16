@@ -59,6 +59,7 @@ from opentelemetry.trace import Link
 from dagster_otel._logging import TraceContextFilter
 from dagster_otel._propagation import (
     _activate_trace_context,
+    _ancestor_runs,
     _own_step_key,
     _seed_run_root_context,
     carrier_to_span_context,
@@ -114,13 +115,20 @@ def _traced_span(context: ExecutionContext, name: str) -> Generator[None, None, 
     # available at this call site.
     configure()
 
+    # This run and (for retry-from-failure) its ancestor runs, fetched once and
+    # reused by every lookup below that might need it (Issue #35) -- each of
+    # find_upstream_trace_contexts/find_external_trace_context/
+    # find_previous_attempt_context otherwise independently re-walks and re-fetches
+    # the identical chain.
+    runs = _ancestor_runs(context)
+
     # Every real, direct upstream dependency that has itself published a trace
     # context (see _propagation.py's module docstring for why "real dependency",
     # not "nearest enclosing subgraph"). Ordered deterministically: the first becomes
     # this span's actual parent, any rest become Links -- fan-in (e.g. a merge step
     # depending on two independent roots) is then visible as extra Links on the span
     # rather than silently collapsing onto whichever upstream happened to be found.
-    upstream_contexts = find_upstream_trace_contexts(context)
+    upstream_contexts = find_upstream_trace_contexts(context, runs)
     if upstream_contexts:
         primary_context, *secondary_contexts = upstream_contexts
         _activate_trace_context(primary_context)
@@ -138,7 +146,7 @@ def _traced_span(context: ExecutionContext, name: str) -> Generator[None, None, 
         # collision (see _propagation.py module docstring): every step with no real
         # parent derives the *same* trace_id (external or deterministic-seeded)
         # instead, so independent branches still end up in one trace together.
-        external_context = find_external_trace_context(context)
+        external_context = find_external_trace_context(context, runs)
         if external_context is not None:
             _activate_trace_context(external_context)
         else:
@@ -153,7 +161,7 @@ def _traced_span(context: ExecutionContext, name: str) -> Generator[None, None, 
     # parent is (still the step's actual upstream dependency, or the deterministic
     # root seed) -- it adds a Link to the previous attempt alongside that, the same
     # primitive already used for fan-in.
-    previous_attempt_context = find_previous_attempt_context(context)
+    previous_attempt_context = find_previous_attempt_context(context, runs)
     if previous_attempt_context is not None:
         links = [*links, Link(carrier_to_span_context(previous_attempt_context))]
 

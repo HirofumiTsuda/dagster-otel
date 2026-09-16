@@ -853,6 +853,52 @@ collect_results          CHILD_OF process_file[a], FOLLOWS_FROM process_file[b],
 `collect_results`'s lookups for `"process_file[a]"`/`"[b]"`/`"[c]"` would never have
 matched it, silently falling back to a fresh disconnected root instead.
 
+## `traced_dbt()` handles op-based `dbt.cli()` usage too (Issue #47, 2026-09-16)
+
+`traced_dbt()`'s span-creation code only matched `Output` (asset span) and
+`AssetCheckResult` (check span) -- the events `dagster_dbt` yields for `@dbt_assets`
+usage. But a plain `@op` calling `dbt.cli(...).stream()` directly (not `@dbt_assets`)
+is a real, separately-documented `dagster_dbt` API
+(`DbtCliInvocation.to_default_asset_events`'s own docstring literally describes both
+cases), and it yields *different* event types for the identical underlying dbt run:
+confirmed by reading `dagster_dbt`'s own translation
+(`dagster_dbt/core/dbt_cli_event.py`, installed via `uv sync --group dbt`) --
+`AssetMaterialization` instead of `Output` for models/seeds/snapshots, and either
+`AssetCheckEvaluation` (same shape as `AssetCheckResult`: `asset_key`/`check_name`/
+`passed`/`metadata`, just the op-mode name for it) or `AssetObservation` (dagster_dbt's
+own fallback, for a test with no determinable `AssetCheckKey` -- also used, less
+commonly, in *asset* mode for a test excluded by Dagster's own check selection) for
+tests. None of `AssetMaterialization`/`AssetCheckEvaluation`/`AssetObservation` were
+handled, so op-based usage silently produced zero per-node spans despite `DbtEvent`'s
+own type alias already declaring `AssetMaterialization`/`AssetObservation` as
+supported -- the type signature promised more than the runtime delivered.
+
+`AssetCheckEvaluation` wasn't part of the original issue's own investigation (or the
+prior `DbtEvent` type alias) -- found by reading `to_default_asset_events`'s actual
+return-type annotation directly against the installed `dagster_dbt` version, not
+assumed from the issue text alone.
+
+Fixed by branching on `AssetMaterialization` (keyed by `event.asset_key` directly --
+simpler than `Output`, no `context.asset_key_for_output()` lookup needed) and on
+`AssetCheckResult | AssetCheckEvaluation | AssetObservation` together for the check
+span, with `AssetObservation` (which has neither `check_name` nor `passed`) getting a
+generic span name (`"dbt_observation"`) and no pass/fail status set, instead of one
+invented.
+
+Verified against a real op-based job (`@op def run_dbt_build(context, dbt):
+yield from dbt.cli(["build"], manifest=..., context=context).stream()`, `@traced_dbt()`,
+same jaffle_shop project as the `@dbt_assets` verification) + real Jaeger: 16 spans
+(1 step + 3 assets + 12 checks), identical shape to the `@dbt_assets` result, built
+entirely from `AssetMaterialization`/`AssetCheckEvaluation` events this time instead
+of `Output`/`AssetCheckResult`. Two real setup gotchas hit along the way, neither a
+gap in the actual design: (1) `dbt.cli()` needs `manifest=` passed explicitly for
+op-based usage -- in asset mode this is resolved automatically from the `@dbt_assets`
+definition's own manifest via `context.has_assets_def`, which doesn't exist for a
+plain op; (2) the op itself still needs to yield a real `Output` for its own
+declared output (`Output(None)` after the `yield from`) -- dbt's events don't
+satisfy Dagster's own step-output contract, that's a separate concern from what this
+library adds.
+
 ## Open questions
 
 None currently tracked -- multi-root/fan-in (#5), k8s_job_executor (#3), and

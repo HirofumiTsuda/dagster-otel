@@ -10,7 +10,15 @@ suite -- see the real jaffle_shop verification recorded in docs/design.md for th
 from collections.abc import Generator
 
 from conftest import FakeInstance, make_context
-from dagster import AssetCheckResult, AssetKey, MetadataValue, Output
+from dagster import (
+    AssetCheckEvaluation,
+    AssetCheckResult,
+    AssetKey,
+    AssetMaterialization,
+    AssetObservation,
+    MetadataValue,
+    Output,
+)
 
 from dagster_otel.dbt import traced_dbt
 
@@ -74,6 +82,65 @@ def test_traced_dbt_creates_asset_and_nested_check_spans(spans) -> None:
     assert asset_span.attributes["dagster.asset_key"] == "stg_customers"
     assert check_span.attributes["dagster.asset_key"] == "stg_customers"
     assert check_span.attributes["dagster.check_name"] == "not_null_stg_customers_id"
+
+
+def test_traced_dbt_handles_op_based_dbt_events(spans) -> None:
+    """Issue #47: a plain @op calling dbt.cli(...).stream() (not @dbt_assets) gets
+    AssetMaterialization/AssetCheckEvaluation instead of Output/AssetCheckResult for
+    the identical underlying dbt run -- must produce the same step -> asset -> check
+    span tree, not silently skip every event."""
+
+    @traced_dbt()
+    def my_dbt_op(context) -> Generator[AssetMaterialization | AssetCheckEvaluation, None, None]:
+        yield AssetMaterialization(
+            asset_key=AssetKey("stg_customers"),
+            metadata={"Execution Duration": MetadataValue.float(0.05)},
+        )
+        yield AssetCheckEvaluation(
+            passed=True,
+            check_name="not_null_stg_customers_id",
+            asset_key=AssetKey("stg_customers"),
+            metadata={"Execution Duration": MetadataValue.float(0.02)},
+        )
+
+    context = make_context(FakeInstance(), "run-1", ["my_dbt_op"])
+    events = list(my_dbt_op(context))
+
+    assert len(events) == 2
+    finished = {s.name: s for s in spans.get_finished_spans()}
+    assert set(finished) == {"my_dbt_op", "stg_customers", "not_null_stg_customers_id"}
+
+    step_span = finished["my_dbt_op"]
+    asset_span = finished["stg_customers"]
+    check_span = finished["not_null_stg_customers_id"]
+    assert asset_span.parent is not None
+    assert asset_span.parent.span_id == step_span.context.span_id
+    assert check_span.parent is not None
+    assert check_span.parent.span_id == asset_span.context.span_id
+    assert check_span.attributes["dagster.check_name"] == "not_null_stg_customers_id"
+
+
+def test_traced_dbt_asset_observation_gets_generic_span_no_status(spans) -> None:
+    """AssetObservation -- dagster_dbt's own fallback for a test with no
+    determinable check identity -- has neither check_name nor passed, so it must
+    get a generic span name and no pass/fail status, not a crash or an invented
+    verdict."""
+
+    @traced_dbt()
+    def my_dbt_op(context) -> Generator[AssetObservation, None, None]:
+        yield AssetObservation(
+            asset_key=AssetKey("stg_customers"),
+            metadata={"Execution Duration": MetadataValue.float(0.01)},
+        )
+
+    context = make_context(FakeInstance(), "run-1", ["my_dbt_op"])
+    list(my_dbt_op(context))
+
+    finished = {s.name: s for s in spans.get_finished_spans()}
+    assert "dbt_observation" in finished
+    observation_span = finished["dbt_observation"]
+    assert observation_span.attributes["dagster.asset_key"] == "stg_customers"
+    assert observation_span.status.status_code.name != "ERROR"
 
 
 def test_traced_dbt_check_span_gets_error_status_on_failure(spans) -> None:

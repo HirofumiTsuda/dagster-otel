@@ -36,6 +36,24 @@ Confirmed via a real jaffle_shop `@dbt_assets` materialization + Jaeger (2026-09
   confirmed nesting check spans as children of their asset's span works correctly
   this way, keyed by tracking the most recently seen span per asset_key, not by
   waiting for or requiring any particular event ordering guarantee from dbt/Dagster.
+
+**Op-based `dbt.cli()` usage handled too (Issue #47, 2026-09-16):** a plain `@op`
+calling `dbt.cli(...).stream()` (not `@dbt_assets`) is a real, separately-documented
+`dagster_dbt` API (`DbtCliInvocation.to_default_asset_events`'s own docstring:
+"In a Dagster op definition..."), not just an asset-only feature -- but it yields a
+*different* set of event types for the identical underlying dbt run, confirmed by
+reading `dagster_dbt`'s own translation (`dbt_cli_event.py`):
+`AssetMaterialization` instead of `Output` for models/seeds/snapshots (already
+carrying a real `AssetKey` directly, no `context.asset_key_for_output()` lookup
+needed -- simpler than the `Output` case, not harder), and, for tests,
+`AssetCheckEvaluation` (same shape as `AssetCheckResult` -- `asset_key`/
+`check_name`/`passed`/`metadata`, just the op-mode equivalent) when a test has a
+determinable `AssetCheckKey`, or `AssetObservation` (dagster_dbt's own fallback --
+also used, less commonly, in *asset* mode for a test excluded from Dagster's check
+selection) when it doesn't. All of these carry the same `"Execution Duration"`
+metadata the `Output`/`AssetCheckResult` path already reads. `AssetObservation` has
+no `check_name`/`passed` fields at all (unlike the other two), so it gets a generic
+span name and no pass/fail status set, rather than one invented.
 """
 import time
 from collections.abc import Callable, Generator
@@ -43,6 +61,7 @@ from functools import wraps
 from typing import Any, Concatenate, ParamSpec, TypeVar, overload
 
 from dagster import (
+    AssetCheckEvaluation,
     AssetCheckResult,
     AssetKey,
     AssetMaterialization,
@@ -60,10 +79,16 @@ _tracer = trace.get_tracer("dagster_otel.dbt")
 
 C = TypeVar("C", bound=ExecutionContext)
 P = ParamSpec("P")
+#: A dbt test result event that carries a pass/fail verdict -- AssetCheckResult
+#: (asset-mode) and AssetCheckEvaluation (op-mode) are the identical shape under
+#: different names (see module docstring, Issue #47).
+DbtCheckEvent = AssetCheckResult | AssetCheckEvaluation | AssetObservation
 #: What `dbt.cli(...).stream()` actually yields -- matches (without importing)
-#: dagster_dbt's own DbtDagsterEventType union (module docstring: none of these need
-#: dagster-dbt as an import, they're all core dagster event types already).
-DbtEvent = Output | AssetMaterialization | AssetCheckResult | AssetObservation
+#: dagster_dbt's own `to_default_asset_events` return type (module docstring: none
+#: of these need dagster-dbt as an import, they're all core dagster event types
+#: already) -- covers both @dbt_assets (Output/AssetCheckResult) and op-based
+#: dbt.cli() usage (AssetMaterialization/AssetCheckEvaluation/AssetObservation).
+DbtEvent = Output | AssetMaterialization | DbtCheckEvent
 Y = TypeVar("Y", bound=DbtEvent)
 
 #: A @dbt_assets compute function -- always a generator that neither receives values
@@ -93,18 +118,22 @@ def _emit_asset_span(asset_key: AssetKey, duration_seconds: float) -> Span:
     return span
 
 
-def _emit_check_span(event: AssetCheckResult, duration_seconds: float, parent: Span | None) -> None:
-    """One span per dbt test (an `AssetCheckResult` event), nested under its asset's
-    own span if that asset's Output event was seen earlier in this same iteration
-    (the normal case -- dbt runs a model then its tests) -- under whatever's
-    otherwise ambient (ordinarily the step's own @traced() span) if not.
+def _emit_check_span(event: DbtCheckEvent, duration_seconds: float, parent: Span | None) -> None:
+    """One span per dbt test, nested under its asset's own span if that asset's
+    materialization event was seen earlier in this same iteration (the normal case --
+    dbt runs a model then its tests) -- under whatever's otherwise ambient
+    (ordinarily the step's own @traced() span) if not.
 
-    `AssetCheckResult.asset_key`/`.check_name` are declared `| None` (resolvable from
-    surrounding spec context when omitted, per the class's own docstring) even though
-    events actually produced by dagster_dbt's translation always populate both in
-    practice -- handled defensively (a fallback name, an attribute only set when
-    present) rather than assumed, since nothing here has verified dagster_dbt always
-    populates them for every dbt node type.
+    `AssetCheckResult` (asset-mode) and `AssetCheckEvaluation` (op-mode) are the
+    identical shape under different names (Issue #47) -- both carry `check_name`/
+    `passed`, declared `| None`/`bool` respectively (resolvable from surrounding spec
+    context when `check_name` is omitted, per `AssetCheckResult`'s own docstring)
+    even though events actually produced by dagster_dbt's translation always
+    populate both in practice -- handled defensively (a fallback name) rather than
+    assumed, since nothing here has verified dagster_dbt always populates them for
+    every dbt node type. `AssetObservation` (dagster_dbt's own fallback for a test
+    with no determinable check identity) has neither field at all, so it gets a
+    generic name and no pass/fail status set, rather than one invented.
     """
     end_time = time.time_ns()
     start_time = end_time - int(duration_seconds * 1e9)
@@ -113,7 +142,13 @@ def _emit_check_span(event: AssetCheckResult, duration_seconds: float, parent: S
     if parent is not None:
         parent_context = trace.set_span_in_context(NonRecordingSpan(parent.get_span_context()))
 
-    check_name = event.check_name or "dbt_check"
+    if isinstance(event, AssetObservation):
+        check_name = "dbt_observation"
+        passed: bool | None = None
+    else:
+        check_name = event.check_name or "dbt_check"
+        passed = event.passed
+
     span = _tracer.start_span(check_name, start_time=start_time, context=parent_context)
     if event.asset_key is not None:
         span.set_attribute("dagster.asset_key", event.asset_key.to_user_string())
@@ -121,7 +156,7 @@ def _emit_check_span(event: AssetCheckResult, duration_seconds: float, parent: S
     # A failed dbt test doesn't raise a Python exception, so it never hits
     # start_as_current_span()'s own automatic exception/error-status behavior (see
     # docs/design.md) the rest of this library gets for free -- set explicitly here.
-    if event.passed is False:
+    if passed is False:
         span.set_status(Status(StatusCode.ERROR, f"dbt check failed: {check_name}"))
     span.end(end_time=end_time)
 
@@ -158,7 +193,16 @@ def _traced_dbt_decorator(
                 if duration_seconds is not None and isinstance(event, Output):
                     asset_key = context.asset_key_for_output(event.output_name)
                     asset_spans[asset_key] = _emit_asset_span(asset_key, duration_seconds)
-                elif duration_seconds is not None and isinstance(event, AssetCheckResult):
+                elif duration_seconds is not None and isinstance(event, AssetMaterialization):
+                    # Op-based dbt.cli() usage's equivalent of Output (Issue #47) --
+                    # already carries a real AssetKey directly, no
+                    # context.asset_key_for_output() lookup needed.
+                    asset_spans[event.asset_key] = _emit_asset_span(
+                        event.asset_key, duration_seconds
+                    )
+                elif duration_seconds is not None and isinstance(
+                    event, (AssetCheckResult, AssetCheckEvaluation, AssetObservation)
+                ):
                     _emit_check_span(event, duration_seconds, asset_spans.get(event.asset_key))
                 yield event
 
@@ -196,11 +240,13 @@ def traced_dbt(span_name: Any = None) -> Any:
         def my_dbt_assets(context, dbt: DbtCliResource):
             yield from dbt.cli(["build"], context=context).stream()
 
-    An event without both "Execution Duration" and "unique_id" metadata (not
-    verified against every event type `dbt.cli(...).stream()` can yield -- only
-    `Output` and `AssetCheckResult` were checked) is passed through with no span
+    An event without "Execution Duration" metadata is passed through with no span
     created for it, rather than raising -- better to silently skip a span than break
-    materialization over telemetry.
+    materialization over telemetry. Covers both `@dbt_assets` usage (`Output`/
+    `AssetCheckResult`) and a plain `@op` calling `dbt.cli(...).stream()` directly
+    (`AssetMaterialization`/`AssetCheckEvaluation`/`AssetObservation` -- Issue #47),
+    since `dagster_dbt` yields different event types for the same underlying dbt run
+    depending on which API triggered it (see module docstring).
 
     :param span_name: Passed through to the underlying `traced()` call for the
         step's own (outer) span. Only meaningful with the called form -- with bare

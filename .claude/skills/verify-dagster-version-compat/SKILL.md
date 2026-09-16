@@ -6,7 +6,11 @@ description: Check whether dagster-otel's propagation/logging mechanism still wo
 # Verify Dagster version compatibility
 
 This library depends on **internal** Dagster Python APIs, not the GraphQL API --
-`context.op_handle.path`, `context.instance.all_logs(...)`, `context.log_event(...)`,
+`context.op_handle.path`, `context.instance.add_run_tags`/`get_run_by_id` (the
+run-tag transport, see `_propagation.py`'s module docstring), `context
+.get_step_execution_context().step.step_inputs[*].dependency_keys` (how a step
+resolves its real upstream keys -- the single riskiest one: not `@public`, flagged
+directly in that module's own docstring as an accepted-risk private-API dependence),
 and the fact that `DagsterLogManager` subclasses `logging.Logger`
 (`dagster/_core/log_manager.py`). None of this is a documented, versioned contract.
 See docs/design.md's "Design decision: no monkeypatching" section for why this is a
@@ -14,7 +18,9 @@ real, accepted risk rather than an oversight -- but it means every Dagster relea
 a candidate for silent breakage, more so than a library built only on GraphQL (compare
 [dagster-prometheus-exporter](https://github.com/HirofumiTsuda/dagster-prometheus-exporter),
 which only touches the comparatively more stable GraphQL surface, and still has to
-track this).
+track this). (Skill last synced to the current implementation 2026-09-16 -- if
+`_propagation.py`'s own "what we depend on" docstring changes, re-check this file
+against it.)
 
 Do this in a scratch venv, never the project's own dev environment, and never commit a
 version pin change from this skill without a deliberate decision to move it.
@@ -42,10 +48,18 @@ print('DagsterLogManager subclasses logging.Logger:', issubclass(DagsterLogManag
 "
 ```
 
-Then, inside a real op/asset body (a minimal throwaway job is fine), check
-`context.op_handle.path` is still a sequence of strings, `context.instance.all_logs`
-still accepts `(run_id, DagsterEventType)`, and `context.log_event` still accepts an
-`AssetMaterialization` with a `metadata` dict.
+Then, inside a real op/asset body (a minimal throwaway job/graph with at least two
+dependent steps is fine), check:
+
+- `context.op_handle.path` is still a sequence of strings.
+- `context.instance.add_run_tags(context.run_id, {...})` still writes, and
+  `context.instance.get_run_by_id(context.run_id).tags` still reads it back within
+  the same run.
+- `context.get_step_execution_context().step.step_inputs[*].dependency_keys` still
+  resolves to the real upstream step keys (matching the string
+  `".".join(upstream.op_handle.path)` produces for that step) -- this is the
+  riskiest surface (not `@public`), and the one most likely to silently change shape
+  across a Dagster release rather than raise.
 
 ## 3. Run the full verify-tracing checks against this venv
 

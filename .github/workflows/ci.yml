@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v10.0.1
+      - uses: astral-sh/setup-uv@v10.1.0
 
       - run: uv sync --group test
 
@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v10.0.1
+      - uses: astral-sh/setup-uv@v10.1.0
 
       # Not part of a dependency group (unlike mypy/pyright below): matches
       # dagster-prometheus-exporter's own pattern of pinning ruff by version string

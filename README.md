@@ -66,6 +66,22 @@ usually runs in its own process, sometimes on its own node, so trace context is
 propagated via Dagster's own run storage rather than in-process memory. See
 [docs/design.md](docs/design.md) for how, and what's verified vs. still assumed.
 
+The actual trace shape for a multi-root, fan-in graph (`root_a`/`root_b` independent,
+`merge_op` depending on both) -- verified against real Dagster + Jaeger, not just
+drawn for illustration:
+
+```mermaid
+graph TD
+    root_a[root_a] --> child_a[child_a]
+    root_b[root_b] --> child_b[child_b]
+    root_a --> merge_op[merge_op]
+    root_b -.->|Link| merge_op
+```
+
+`merge_op` gets a real parent (`root_a`, deterministic) plus a `Link` to the other
+dependency it can't have as a second parent -- both relationships stay visible on
+the span, not just whichever upstream happened to be found first.
+
 For `@dbt_assets`, `dagster_otel.dbt.traced_dbt()` is a drop-in replacement for
 `@traced()` that additionally opens a child span per dbt node (model/seed/test),
 keyed by the real Dagster asset_key/check_name -- no changes needed to the function

@@ -244,3 +244,27 @@ def test_traced_fan_in_gets_real_parent_and_link_for_second_upstream(spans) -> N
     # The other real dependency isn't lost -- it's a Link instead of the parent.
     assert len(merge_span.links) == 1
     assert merge_span.links[0].context.span_id == root_b_span.context.span_id
+
+
+def test_traced_sets_dagster_context_span_attributes(spans) -> None:
+    """Issue #9: run_id/job_name/step_key/retry_number should be on the span itself,
+    not just derivable by cross-referencing Dagster's own UI/event log."""
+
+    @traced()
+    def my_op(context) -> None:
+        pass
+
+    ctx = make_context(
+        FakeInstance(),
+        "run-1",
+        ["outer", "my_op"],
+        job_name="my_job",
+        retry_number=2,
+    )
+    my_op(ctx)
+
+    (span,) = spans.get_finished_spans()
+    assert span.attributes["dagster.run_id"] == "run-1"
+    assert span.attributes["dagster.job_name"] == "my_job"
+    assert span.attributes["dagster.step_key"] == "outer.my_op"
+    assert span.attributes["dagster.retry_number"] == 2

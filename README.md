@@ -4,6 +4,7 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/dagster-otel)](https://pypi.org/project/dagster-otel/)
 [![Release](https://img.shields.io/github/v/release/HirofumiTsuda/dagster-otel)](https://github.com/HirofumiTsuda/dagster-otel/releases/latest)
 [![CI](https://github.com/HirofumiTsuda/dagster-otel/actions/workflows/ci.yml/badge.svg)](https://github.com/HirofumiTsuda/dagster-otel/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/HirofumiTsuda/dagster-otel/actions/workflows/codeql.yml/badge.svg)](https://github.com/HirofumiTsuda/dagster-otel/actions/workflows/codeql.yml)
 [![License: MIT](https://img.shields.io/github/license/HirofumiTsuda/dagster-otel)](LICENSE)
 
 OpenTelemetry tracing for Dagster ops and assets -- with trace/span IDs correlated into
@@ -12,6 +13,10 @@ third-party decorator, and without monkeypatching Dagster internals.
 
 **Status: early release, self-tested locally against real Dagster runs (`multiprocess`,
 `k8s_job_executor`, retry-from-failure) + a real trace backend.**
+
+![A Jaeger trace showing jaffle_shop_dbt_assets nested into per-model and per-test spans](docs/images/jaeger-trace-dbt.png)
+*A real trace from the included example -- `traced_dbt()` turns one opaque
+`@dbt_assets` step into a real `step → asset → check` tree.*
 
 ## Table of Contents
 
@@ -97,10 +102,9 @@ def my_dbt_assets(context, dbt: DbtCliResource):
 ```
 
 In Jaeger, that's a real `step → asset → check` tree, not one opaque span for the
-whole `dbt build` -- this is the real jaffle_shop example (16 spans: 1 step + 3
-assets + 12 checks), each with the accurate duration dbt itself measured:
-
-![A Jaeger trace showing my_dbt_assets nested into per-model and per-test spans](docs/images/jaeger-trace-dbt.png)
+whole `dbt build` -- see the screenshot at the top of this README (the real
+jaffle_shop example: 16 spans, 1 step + 3 assets + 12 checks), each with the
+accurate duration dbt itself measured.
 
 ## Configuration
 

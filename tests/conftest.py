@@ -94,20 +94,28 @@ def make_context(
     run_id: str,
     op_path: list[str],
     deps: list[str] | None = None,
+    job_name: str = "test_job",
+    retry_number: int = 0,
 ) -> ExecutionContext:
     """A fake op/asset execution context with just enough surface for dagster_otel:
-    op_handle.path, run_id, instance, log_event (unused since the run-tags switch, but
-    harmless to keep), log (a real logging.Logger -- context.log is a genuine
-    logging.Logger subclass in real Dagster too, see _logging.py's module docstring, so
-    using a plain one here matches the real shape rather than faking it), and
-    get_step_execution_context().step.step_inputs[*].dependency_keys -- the same public
-    method (see _propagation.py's _upstream_step_keys docstring) real Dagster defines
-    identically on both OpExecutionContext and AssetExecutionContext, so this fake
-    doesn't need to model the two context shapes differently either.
+    op_handle.path, run_id, job_name, retry_number, instance, log_event (unused since
+    the run-tags switch, but harmless to keep), log (a real logging.Logger --
+    context.log is a genuine logging.Logger subclass in real Dagster too, see
+    _logging.py's module docstring, so using a plain one here matches the real shape
+    rather than faking it), and get_step_execution_context().step.step_inputs[*].
+    dependency_keys -- the same public method (see _propagation.py's
+    _upstream_step_keys docstring) real Dagster defines identically on both
+    OpExecutionContext and AssetExecutionContext, so this fake doesn't need to model
+    the two context shapes differently either.
 
     :param deps: step_keys this step directly depends on, matching real Dagster's
         `StepInput.dependency_keys` -- e.g. `deps=["root_op"]` for a step whose only
         input comes from a step named `root_op`. Defaults to no dependencies (a root).
+    :param job_name: matches real Dagster's `context.job_name` -- only meaningful for
+        tests asserting on the `dagster.job_name` span attribute.
+    :param retry_number: matches real Dagster's `context.retry_number` (0 for the
+        first attempt) -- only meaningful for tests asserting on the
+        `dagster.retry_number` span attribute.
     """
     if instance.get_run_by_id(run_id) is None:
         instance.create_run(run_id)
@@ -116,6 +124,8 @@ def make_context(
     return SimpleNamespace(  # type: ignore[return-value]
         op_handle=SimpleNamespace(path=op_path),
         run_id=run_id,
+        job_name=job_name,
+        retry_number=retry_number,
         instance=instance,
         log_event=lambda event: None,
         log=logging.getLogger(f"test.{run_id}.{'.'.join(op_path)}"),

@@ -557,6 +557,40 @@ Verified against real Dagster + Jaeger: a `root_op`/`child_op` job with bare
 `@traced` (no parens) on both produces the identical correct trace shape (`child_op`
 `CHILD_OF` `root_op`) as the called form.
 
+## Dagster context as span attributes (Issue #9, 2026-09-16)
+
+Confirmed via a real Jaeger span (2026-09-15, during the Issue #9 investigation) that
+spans carried no custom attributes at all before this -- everything visible was OTel
+SDK boilerplate (`otel.scope.name`, `span.kind`) or process-level `telemetry.sdk.*`
+metadata. A trace told you *when* and *in what parent/child (or Link) shape* a step
+ran, but nothing about *which run*, *which job*, or *which retry attempt* it belonged
+to without cross-referencing Dagster's own UI/event log by hand.
+
+Four attributes added, all `@public`-documented properties already available on
+`context` (no extra Dagster call needed): `dagster.run_id`, `dagster.job_name`,
+`dagster.step_key` (`_own_step_key(context)` -- the same identity `_propagation.py`
+already keys published trace contexts by), and `dagster.retry_number`. Not a name
+set picked in isolation: researched while comparing against other orchestrators'
+OTel support (2026-09-15), and Airflow's own native tracing (`dag_id`/`task_id`/
+`run_id`/`try_number` attributes on its task spans) and Leoflow's ADR 0010 (a
+from-scratch Airflow-compatible orchestrator, `leoflow.dag_id`/`leoflow.task_id`/
+`leoflow.run_id`/`leoflow.try_number`) both independently converge on essentially
+this same attribute set.
+
+`asset_key` deliberately not included: `context.asset_key` raises
+`DagsterInvariantViolationError` for a `multi_asset` with more than one output asset
+(confirmed in the property's own source) -- handling that safely needs
+`selected_asset_keys` (plural) instead, more design work than "cheap to add" covers.
+Tracked as a follow-up, not done half-right here.
+
+Verified against real Dagster + Jaeger, including a `RetryPolicy`-triggered
+same-run retry (see Issue #14): both the failed first attempt and the successful
+retry carried the correct, distinct `dagster.retry_number` (`0` then `1`), alongside
+identical `dagster.run_id`/`dagster.job_name`/`dagster.step_key`. This doesn't fix
+Issue #14 (the two attempts are still unrelated sibling spans, no `Link` between
+them) but does make them distinguishable from each other by attribute, which is a
+real partial improvement toward that issue even before it's fully addressed.
+
 ## Open questions
 
 None currently tracked -- multi-root/fan-in (#5), k8s_job_executor (#3), and

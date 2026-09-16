@@ -59,6 +59,7 @@ from opentelemetry.trace import Link
 from dagster_otel._logging import TraceContextFilter
 from dagster_otel._propagation import (
     _activate_trace_context,
+    _own_step_key,
     _seed_run_root_context,
     carrier_to_span_context,
     find_upstream_trace_contexts,
@@ -154,7 +155,26 @@ def _traced_span(context: ExecutionContext, name: str) -> Generator[None, None, 
     # log lines with the wrong span while both are active.
     dagster_builtin_log = get_dagster_logger()
 
-    with _tracer.start_as_current_span(name, links=links):
+    with _tracer.start_as_current_span(name, links=links) as span:
+        # Dagster context as span attributes (Issue #9) -- confirmed via a real
+        # Jaeger span (2026-09-15) that nothing here was previously attached: every
+        # attribute on a span was either OTel SDK boilerplate (otel.scope.name,
+        # span.kind) or process-level telemetry.sdk.* metadata, nothing identifying
+        # which run/job/step/attempt a span even belonged to without
+        # cross-referencing Dagster's own UI/event log by hand. All four are
+        # `@public`-documented properties, no extra Dagster calls needed.
+        #
+        # asset_key deliberately not included yet: context.asset_key raises
+        # DagsterInvariantViolationError for a multi_asset with more than one
+        # output asset (confirmed in the property's own docstring/source) --
+        # handling that safely needs `selected_asset_keys` (plural) instead, more
+        # design work than "cheap to add" covers; tracked as a follow-up on #9
+        # rather than done half-right here.
+        span.set_attribute("dagster.run_id", context.run_id)
+        span.set_attribute("dagster.job_name", context.job_name)
+        span.set_attribute("dagster.step_key", _own_step_key(context))
+        span.set_attribute("dagster.retry_number", context.retry_number)
+
         # Published unconditionally now, not just when this step turns out to have
         # no parent (the old subgraph-keyed design's behavior): every step publishes
         # under its own step key (see _propagation.py), because it's each step's own

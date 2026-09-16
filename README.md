@@ -96,6 +96,12 @@ def my_dbt_assets(context, dbt: DbtCliResource):
     yield from dbt.cli(["build"], context=context).stream()
 ```
 
+In Jaeger, that's a real `step → asset → check` tree, not one opaque span for the
+whole `dbt build` -- this is the real jaffle_shop example (16 spans: 1 step + 3
+assets + 12 checks), each with the accurate duration dbt itself measured:
+
+![A Jaeger trace showing my_dbt_assets nested into per-model and per-test spans](docs/images/jaeger-trace-dbt.png)
+
 ## Configuration
 
 Standard OTel environment variables -- nothing bespoke:

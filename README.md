@@ -143,6 +143,24 @@ my_job.execute_in_process(tags={EXTERNAL_TRACE_CONTEXT_TAG_KEY: json.dumps(carri
 Every root step in the run (the ones that would otherwise seed a fresh trace) checks
 for this tag first. See [docs/design.md](docs/design.md) for the full verification.
 
+### Trace backends checked
+
+No backend-specific code exists here -- `configure()` constructs `OTLPSpanExporter()`
+with no `endpoint=`/`headers=`/`credentials=`, so anything speaking OTLP should work
+purely via the env vars above. What's actually been checked end-to-end, not just
+assumed to work by construction:
+
+| Backend | License | Status |
+| --- | --- | --- |
+| Jaeger | Apache-2.0 | ✅ Verified -- `multiprocess`/`k8s_job_executor`/retry-from-failure/`traced_dbt()`/external trace context, see [docs/design.md](docs/design.md) |
+| Grafana Tempo | AGPL-3.0 | ⬜ Not yet -- [#42](https://github.com/HirofumiTsuda/dagster-otel/issues/42) |
+| SigNoz | MIT | ⬜ Not yet -- [#43](https://github.com/HirofumiTsuda/dagster-otel/issues/43) |
+
+Should work the same way against any other OTLP-compatible backend (Honeycomb,
+Datadog, New Relic, a generic OTel Collector, ...) -- just not individually checked
+off here yet. [Open an issue](https://github.com/HirofumiTsuda/dagster-otel/issues/new/choose)
+if you hit something backend-specific.
+
 ## Compatibility
 
 Built and verified against **Dagster 1.13.22** and **`opentelemetry-sdk` 1.44.0**

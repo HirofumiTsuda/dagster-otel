@@ -10,7 +10,9 @@ model), copied from
 [`dagster-prometheus-exporter`](https://github.com/HirofumiTsuda/dagster-prometheus-exporter)'s
 dev fixture of the same name (same author, same license, not vendored from anywhere
 else -- see `jaffle_shop/README.md` for its own attribution notes).
-`dagster_workspace/definitions.py` wraps its `@dbt_assets` function with `@traced()`.
+`dagster_workspace/definitions.py` wraps its `@dbt_assets` function with
+`traced_dbt()` (`dagster_otel.dbt`, see [Issue #8](https://github.com/HirofumiTsuda/dagster-otel/issues/8))
+-- a child span per dbt node, not just one span for the whole step.
 
 ## Setup
 
@@ -30,11 +32,8 @@ cd examples/jaffle_shop && DAGSTER_HOME=/tmp/dagster-otel-jaffle-shop uv run --p
 
 ## Running
 
-A local Jaeger with OTLP ingest is enough to see the result:
-
-```sh
-docker run -d --name jaeger -p 16686:16686 -p 4317:4317 jaegertracing/all-in-one:latest
-```
+A local Jaeger with OTLP ingest is enough to see the result -- `docker compose up -d`
+from the repo root starts one (see the top-level `docker-compose.yaml`).
 
 ```sh
 DAGSTER_HOME=/tmp/dagster-otel-jaffle-shop \
@@ -44,9 +43,10 @@ uv run dagster asset materialize -f examples/dagster_workspace/definitions.py --
 ```
 
 Open http://localhost:16686, select the `jaffle_shop_example` service, and you
-should see a single `jaffle_shop_dbt_assets` span covering the whole `dbt build` run
-(one Dagster step materializes every dbt model regardless of how many there are --
-this is expected, not a bug).
+should see a `jaffle_shop_dbt_assets` span with one child span per dbt node
+(`raw_customers`, `stg_customers`, `customers`, each with their own dbt test spans
+nested underneath) -- confirmed real, accurate durations per node, not zero-width
+markers (see Issue #8 / `docs/design.md`).
 
 ### Log correlation
 

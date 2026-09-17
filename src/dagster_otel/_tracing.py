@@ -196,16 +196,28 @@ def _traced_span(context: ExecutionContext, name: str) -> Generator[None, None, 
         # cross-referencing Dagster's own UI/event log by hand. All four are
         # `@public`-documented properties, no extra Dagster calls needed.
         #
-        # asset_key deliberately not included yet: context.asset_key raises
-        # DagsterInvariantViolationError for a multi_asset with more than one
-        # output asset (confirmed in the property's own docstring/source) --
-        # handling that safely needs `selected_asset_keys` (plural) instead, more
-        # design work than "cheap to add" covers; tracked as a follow-up on #9
-        # rather than done half-right here.
+        # asset_key(s) (Issue #37, follow-up on #9): context.asset_key itself raises
+        # DagsterInvariantViolationError for a multi_asset with more than one output
+        # asset -- context.selected_asset_keys (plural, `@public`, a
+        # frozenset[AssetKey]) works uniformly for a plain op (empty set, since
+        # has_assets_def is False), a single-output @asset, and a multi_asset alike,
+        # no branching needed. Comma-joined into one string attribute, not OTel's
+        # native sequence-attribute support: probed directly against real Jaeger
+        # (2026-09-17) that a native list attribute round-trips through OTLP as a
+        # JSON-array-shaped *string* anyway (`["a","b"]`, not a real array in the
+        # UI) -- a plain comma-joined string renders just as well and reads cleaner,
+        # matching how OTel semantic conventions themselves usually flatten
+        # array-shaped attributes into a single string when broad backend support
+        # isn't guaranteed. Sorted for determinism (a set has no stable order of its
+        # own); omitted entirely (not set to an empty string) when there's nothing to
+        # report, same "don't invent a value" stance as the other lookups here.
         span.set_attribute("dagster.run_id", context.run_id)
         span.set_attribute("dagster.job_name", context.job_name)
         span.set_attribute("dagster.step_key", _own_step_key(context))
         span.set_attribute("dagster.retry_number", context.retry_number)
+        asset_keys = sorted(k.to_user_string() for k in context.selected_asset_keys)
+        if asset_keys:
+            span.set_attribute("dagster.asset_keys", ",".join(asset_keys))
 
         # Published unconditionally now, not just when this step turns out to have
         # no parent (the old subgraph-keyed design's behavior): every step publishes

@@ -899,6 +899,32 @@ declared output (`Output(None)` after the `yield from`) -- dbt's events don't
 satisfy Dagster's own step-output contract, that's a separate concern from what this
 library adds.
 
+## `dagster.asset_keys` span attribute, including `@multi_asset` (Issue #37, 2026-09-17)
+
+Issue #9 deliberately left `dagster.asset_key` out of the four `dagster.*` attributes
+it added, because `context.asset_key` raises `DagsterInvariantViolationError` for a
+`@multi_asset` with more than one output asset -- exactly the case this follow-up
+needed to handle, not a nice-to-have.
+
+Fixed with `context.selected_asset_keys` (`@public`, a `frozenset[AssetKey]`) instead
+of `context.asset_key` -- works uniformly for a plain `@op` (empty set, confirmed by
+reading the property's own source: it returns `set()` when `not self.has_assets_def`,
+never raises), a single-output `@asset`, and a `@multi_asset` alike, no branching
+needed on context shape. Comma-joined into one `dagster.asset_keys` string attribute
+(sorted, since a set has no stable order), not OTel's native sequence-attribute
+support -- probed directly against real Jaeger (2026-09-17) that a native list
+attribute round-trips through OTLP as a JSON-array-*shaped string* anyway
+(`'["a","b"]'`, not a real array in the UI), so a plain comma-joined string renders
+just as cleanly and reads better. Omitted entirely (not set to `""`) when there's
+nothing to report, same "don't invent a value" stance as every other lookup in this
+library.
+
+Verified against a real `@multi_asset` with two outputs (`zeta_asset`, `alpha_asset`
+-- deliberately out-of-alphabetical-order asset names, to actually exercise the
+sort) + real Jaeger: the span's `dagster.asset_keys` attribute reads
+`"alpha_asset,zeta_asset"` -- both present, correctly sorted, on exactly the case
+`context.asset_key` itself cannot handle.
+
 ## Open questions
 
 None currently tracked -- multi-root/fan-in (#5), k8s_job_executor (#3), and

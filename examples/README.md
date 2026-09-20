@@ -75,15 +75,15 @@ Find the trace with `serviceStats.jaffle_shop_example.spanCount: 16`, then
 
 ```mermaid
 flowchart LR
-    assets["jaffle_shop_dbt_assets<br/>(dagster dev, traced_dbt())"]
+    webserver["jaffle-shop: dagster dev webserver<br/>(serves jaffle_shop_dbt_assets, traced_dbt())"]
     exporter["dagster-prometheus-exporter<br/>(/metrics)"]
     collector["otel-collector"]
     tempo[("Tempo")]
     prometheus[("Prometheus")]
     grafana["Grafana"]
 
-    assets -- "OTLP traces" --> collector
-    exporter -- "GraphQL query" --> assets
+    webserver -- "OTLP traces (per run)" --> collector
+    exporter -- "GraphQL query" --> webserver
     collector -- "scrapes :9101/metrics" --> exporter
     collector -- "otlp/tempo exporter" --> tempo
     collector -- "prometheusremotewrite" --> prometheus

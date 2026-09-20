@@ -154,13 +154,13 @@ assumed to work by construction:
 | Backend | License | Status |
 | --- | --- | --- |
 | Jaeger | Apache-2.0 | ✅ Verified -- `multiprocess`/`k8s_job_executor`/retry-from-failure/`traced_dbt()`/external trace context, see [docs/design.md](docs/design.md) |
-| Grafana Tempo | AGPL-3.0 | ⬜ Not yet -- [#42](https://github.com/HirofumiTsuda/dagster-otel/issues/42) |
+| Grafana Tempo | AGPL-3.0 | ✅ Verified -- real `@dbt_assets` jaffle_shop pipeline, through a real OTel Collector (not sent directly), see [docs/design.md](docs/design.md) |
 | SigNoz | MIT | ⬜ Not yet -- [#43](https://github.com/HirofumiTsuda/dagster-otel/issues/43) |
 
 Should work the same way against any other OTLP-compatible backend (Honeycomb,
-Datadog, New Relic, a generic OTel Collector, ...) -- just not individually checked
-off here yet. [Open an issue](https://github.com/HirofumiTsuda/dagster-otel/issues/new/choose)
-if you hit something backend-specific.
+Datadog, New Relic, ...) -- just not individually checked off here yet. [Open an
+issue](https://github.com/HirofumiTsuda/dagster-otel/issues/new/choose) if you hit
+something backend-specific.
 
 ## Compatibility
 

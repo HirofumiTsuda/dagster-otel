@@ -1,0 +1,25 @@
+# Real OTel Collector in the dev stack (Issue #42, and the trace half of Issue #56's
+# combined-demo architecture) -- dagster-otel points OTEL_EXPORTER_OTLP_ENDPOINT here
+# instead of directly at a backend, same as a real deployment fronting multiple
+# instrumented services with one Collector. Traces-only for now; Issue #56 adds a
+# prometheus receiver here to also scrape dagster-prometheus-exporter's /metrics and
+# forward both signal types through this same Collector.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [otlp/tempo]

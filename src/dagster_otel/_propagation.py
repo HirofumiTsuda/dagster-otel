@@ -75,16 +75,15 @@ a genuine root: every step derives the same trace_id deterministically from
 *same trace* as the rest of the run.
 """
 
-import hashlib
 import json
 from collections.abc import Sequence
 
 from dagster import DagsterRun
 from opentelemetry import context as otel_context
 from opentelemetry import trace
-from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
+from dagster_otel._setup import _current_run_id
 from dagster_otel._types import ExecutionContext
 
 #: Run tag key prefix. Full tag key is this plus the publishing step's own step key
@@ -320,25 +319,19 @@ def carrier_to_span_context(carrier: dict[str, str]) -> trace.SpanContext:
 
 
 def _seed_run_root_context(context: ExecutionContext) -> None:
-    """Activate a context carrying a trace_id derived deterministically from the run
-    ID, for a step that found no real parent to attach to (see module docstring for
-    the cases this covers). Every step that calls this for the same run computes the
-    identical trace_id independently, with no shared state and no race.
+    """Arrange for a trace_id derived deterministically from the run ID, for a step
+    that found no real parent to attach to (see module docstring for the cases this
+    covers). Every step that calls this for the same run computes the identical
+    trace_id independently, with no shared state and no race.
 
-    The seeded span context is a NonRecordingSpan (Dagster's own run storage, not
-    this, remains the source of truth for real parent/child spans -- see
-    publish_trace_context/find_upstream_trace_contexts) with `is_remote=True`, the
-    same shape OTel's own propagators use for context received from outside the
-    process. Its span_id is a fixed placeholder (never a real span), only trace_id
-    matters here.
+    Does *not* activate any OTel context (deliberately, Issue #63) -- setting
+    `_current_run_id` (`_setup.py`) instead lets `_DeterministicRunIdGenerator`
+    produce the shared trace_id at the point the SDK actually starts the span, with
+    no parent context at all, so the resulting span is a genuine root (no
+    `parent_span_id` in the exported data) rather than looking like the child of a
+    parent span that was never real. See `_DeterministicRunIdGenerator`'s docstring
+    for why the previous fake-parent-context approach broke trace-tree tools that
+    resolve a trace's root structurally (Grafana's native traces panel, backed by
+    Tempo).
     """
-    trace_id = int.from_bytes(hashlib.sha256(context.run_id.encode()).digest()[:16], "big")
-    seed = NonRecordingSpan(
-        SpanContext(
-            trace_id=trace_id,
-            span_id=0x1,
-            is_remote=True,
-            trace_flags=TraceFlags(TraceFlags.SAMPLED),
-        )
-    )
-    otel_context.attach(trace.set_span_in_context(seed))
+    _current_run_id.set(context.run_id)

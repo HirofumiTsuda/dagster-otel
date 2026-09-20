@@ -1,5 +1,6 @@
 """Tests for dagster_otel._tracing: the public @traced() decorator."""
 
+import hashlib
 import json
 
 from conftest import FakeInstance, make_context
@@ -389,7 +390,12 @@ def test_traced_root_falls_back_to_deterministic_seed_without_external_context(
     spans,
 ) -> None:
     """No EXTERNAL_TRACE_CONTEXT_TAG_KEY tag set -- unchanged existing behavior,
-    the deterministic run_id-seed fallback, not broken by adding the new check."""
+    the deterministic run_id-seed fallback, not broken by adding the new check.
+
+    Issue #63: this used to also assert `span.parent.span_id == 0x1` (the old
+    fake-parent-context approach, which broke trace-tree tools resolving a real
+    root) -- now a genuine root (no parent at all), same deterministic trace_id
+    via _DeterministicRunIdGenerator instead."""
 
     @traced()
     def root_op(context) -> None:
@@ -398,5 +404,6 @@ def test_traced_root_falls_back_to_deterministic_seed_without_external_context(
     root_op(make_context(FakeInstance(), "run-1", ["root_op"]))
 
     (span,) = spans.get_finished_spans()
-    assert span.parent is not None
-    assert span.parent.span_id == 0x1  # _seed_run_root_context's fixed placeholder
+    assert span.parent is None
+    expected_trace_id = int.from_bytes(hashlib.sha256(b"run-1").digest()[:16], "big")
+    assert span.context.trace_id == expected_trace_id

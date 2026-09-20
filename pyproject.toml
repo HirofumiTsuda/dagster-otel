@@ -25,6 +25,10 @@ dependencies = [
     "opentelemetry-api >= 1.15, < 2",
     "opentelemetry-sdk >= 1.15, < 2",
     "opentelemetry-exporter-otlp-proto-grpc >= 1.15, < 2",
+    # For OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf (Issue #48) -- opentelemetry-python
+    # only implements "grpc" and "http/protobuf" of the spec's protocol values, not
+    # "http/json", so that's the full set _setup.py needs to support.
+    "opentelemetry-exporter-otlp-proto-http >= 1.15, < 2",
 ]
 
 [dependency-groups]

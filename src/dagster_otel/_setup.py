@@ -18,10 +18,28 @@ building a parallel config surface. Set OTEL_SERVICE_NAME / OTEL_EXPORTER_OTLP_E
 import os
 
 from opentelemetry import trace
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+    OTLPSpanExporter as _GrpcOTLPSpanExporter,
+)
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+    OTLPSpanExporter as _HttpOTLPSpanExporter,
+)
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+
+#: The only two OTLP transports opentelemetry-python itself implements -- the spec
+#: (https://opentelemetry.io/docs/languages/sdk-configuration/otlp-exporter/) also
+#: lists "http/json", but there's no exporter class for it to select in this SDK, so
+#: it isn't a value this module can honor either. Confirmed against opentelemetry-sdk
+#: 1.44.0's own private _get_exporter_entry_point (used by the "otlp" auto-instrument
+#: entry point) that "grpc"/"http/protobuf" are the only two it maps -- not relying on
+#: that private helper here (leading underscore, not public API), just matching its
+#: behavior with our own small mapping instead of inventing different values.
+_OTLP_EXPORTER_BY_PROTOCOL = {
+    "grpc": _GrpcOTLPSpanExporter,
+    "http/protobuf": _HttpOTLPSpanExporter,
+}
 
 #: Verified (2026-09-15): with an unreachable OTLP endpoint and the exporter's own
 #: default timeout (10s, OTEL_EXPORTER_OTLP_TRACES_TIMEOUT's spec default), every
@@ -34,6 +52,29 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 #: OTEL_EXPORTER_OTLP_TRACES_TIMEOUT/OTEL_EXPORTER_OTLP_TIMEOUT is always honored
 #: instead, same as this module's general policy of not overriding standard env vars.
 _DEFAULT_OTLP_TIMEOUT_SECONDS = 2.0
+
+
+def _resolve_otlp_exporter_class() -> type:
+    """Which OTLPSpanExporter class to use, per `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL`/
+    `OTEL_EXPORTER_OTLP_PROTOCOL` (signal-specific var wins, matching the spec's own
+    precedence for every other OTEL_EXPORTER_OTLP_* pair this module already honors).
+
+    Defaults to the gRPC exporter when neither is set, preserving this project's
+    existing documented/verified behavior for anyone not setting the var (Issue #48).
+    """
+    protocol = (
+        os.environ.get("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL")
+        or os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL")
+        or "grpc"
+    ).strip()
+    try:
+        return _OTLP_EXPORTER_BY_PROTOCOL[protocol]
+    except KeyError:
+        raise ValueError(
+            f"Unsupported OTLP protocol {protocol!r} (from OTEL_EXPORTER_OTLP_TRACES_PROTOCOL "
+            "/ OTEL_EXPORTER_OTLP_PROTOCOL) -- dagster-otel supports 'grpc' and "
+            "'http/protobuf', the two opentelemetry-python itself implements."
+        ) from None
 
 
 def _export_configured() -> bool:
@@ -92,6 +133,13 @@ def configure() -> None:
     opt back in -- picked as the safer default of the two failure modes: a
     surprise-to-a-brand-new-user network stall on every step vs. a one-line env var
     for a more sophisticated deployment.
+
+    Transport defaults to gRPC, same as always, but honors
+    `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL`/`OTEL_EXPORTER_OTLP_PROTOCOL` if set (Issue
+    #48) -- see `_resolve_otlp_exporter_class()`. Only `grpc` and `http/protobuf` are
+    supported (the two opentelemetry-python itself implements); anything else raises
+    rather than silently falling back, so a typo'd protocol value fails loudly instead
+    of quietly keeping gRPC.
     """
     if not _export_configured():
         trace.set_tracer_provider(TracerProvider(resource=Resource.create()))
@@ -103,6 +151,8 @@ def configure() -> None:
     )
     timeout = None if has_explicit_timeout else _DEFAULT_OTLP_TIMEOUT_SECONDS
 
+    exporter_class = _resolve_otlp_exporter_class()
+
     provider = TracerProvider(resource=Resource.create())
-    provider.add_span_processor(SimpleSpanProcessor(OTLPSpanExporter(timeout=timeout)))
+    provider.add_span_processor(SimpleSpanProcessor(exporter_class(timeout=timeout)))
     trace.set_tracer_provider(provider)

@@ -55,7 +55,7 @@
     {
       "id": 4,
       "title": "jaffle_shop_dbt_assets traces",
-      "description": "The trace half of this same run -- set OTEL_SERVICE_NAME to match your own pipeline's service name if you're pointing this at something other than the jaffle_shop example.",
+      "description": "The trace half of this same run -- set OTEL_SERVICE_NAME to match your own pipeline's service name if you're pointing this at something other than the jaffle_shop example. If this shows \"No data found in response\" with everything else looking right, check the query editor's \"Table view\" toggle is off -- it's a per-viewer UI preference, not saved in this dashboard, so it can be on without anything here having changed.",
       "type": "traces",
       "datasource": { "type": "tempo", "uid": "tempo" },
       "targets": [

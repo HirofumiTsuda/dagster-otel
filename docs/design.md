@@ -1129,12 +1129,33 @@ real but insufficient on their own to fix it.
   `AAAAAAAAAAE=` (base64) decodes to `0000000000000001`, and no span with that ID
   exists anywhere in the trace. Tempo's own search summary reflects this
   accurately: `"rootServiceName": "<root span not yet received>"` on every trace
-  this project has produced through this code path, not just this demo's. Filed as
-  [Issue #63](https://github.com/HirofumiTsuda/dagster-otel/issues/63) -- a real
-  fix needs a custom OTel `IdGenerator` to get a deterministic `trace_id` without
-  the SDK's parent-inheritance mechanism forcing a `parent_span_id` onto the
-  result, more design work than this debugging session should turn into an
-  ad-hoc patch.
+  this project has produced through this code path, not just this demo's. **Fixed
+  in [Issue #63](https://github.com/HirofumiTsuda/dagster-otel/issues/63)** --
+  `_DeterministicRunIdGenerator` (`_setup.py`), a custom OTel `IdGenerator`, gets
+  the deterministic `trace_id` without ever activating a parent context at all, so
+  the SDK's own `parent_span_id`-recording logic has nothing to attach to. Verified
+  after the fix landed: `rootServiceName` resolves correctly, and the dashboard's
+  traces panel renders the trace.
+- **Two more, purely browser/session-side, found confirming the fix above through
+  the actual dashboard UI (not just the API) with a real person watching:**
+  - Grafana's session token has a rotation mechanism that can end up needing a
+    fresh login to recover from -- confirmed via server logs at the exact moment
+    of a failed panel load: `error="[session.token.rotate] token needs to be
+    rotated"`, `POST /api/ds/query status=401`. Frontend shows this as "No data
+    found in response" (a data-shaped message for what's actually an auth
+    failure), so it's easy to misdiagnose as a query/backend problem. Logging out
+    and back in resolves it, but note Grafana's post-login redirect can land on
+    the home page, not back on the dashboard you were viewing -- re-navigate to it
+    explicitly rather than assuming a re-login alone fixes a panel that's no
+    longer even on screen.
+  - The query editor's **"Table view"** toggle is a per-viewer UI preference, not
+    part of the saved dashboard -- turning it on for the traces panel produces the
+    same "No data found in response", with nothing in the dashboard JSON
+    responsible for it (confirmed: fetched the live dashboard's JSON directly,
+    nothing table-view-related is stored on the panel or its targets). No fix
+    possible in the dashboard definition itself; noted in the traces panel's own
+    `description` field instead, the one thing that *is* persisted and visible to
+    whoever hits this next.
 
 ## Open questions
 

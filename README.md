@@ -115,6 +115,7 @@ Standard OTel environment variables -- nothing bespoke:
 | `OTEL_SERVICE_NAME` | Names your service in the trace backend. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` (or `..._TRACES_ENDPOINT`) | Where to send spans (e.g. `http://localhost:4317`). Required -- without one of these set, no real exporter is attached at all (see below). |
 | `OTEL_EXPORTER_OTLP_TRACES_TIMEOUT` / `..._TIMEOUT` | Per-export timeout. Set this yourself if the default (2s) doesn't fit -- see [docs/design.md](docs/design.md) for why a default exists at all (an unreachable collector otherwise blocked every step for ~7s). |
+| `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` / `..._PROTOCOL` | Transport to export over: `grpc` (default) or `http/protobuf` -- e.g. for a collector that only exposes HTTP ingest, or an environment that blocks gRPC egress. Any other value raises rather than silently keeping gRPC. |
 | `OTEL_SDK_DISABLED` | Set to `true` to force no export regardless of the endpoint vars above. |
 
 `@traced()` reads these itself (idempotently) the first time it runs in a process --

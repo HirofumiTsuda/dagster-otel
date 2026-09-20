@@ -12,10 +12,10 @@ against a real Dagster run + Jaeger, not here -- see docs/design.md.
 import pytest
 
 from dagster_otel._setup import (
+    _build_otlp_exporter,
     _export_configured,
     _GrpcOTLPSpanExporter,
     _HttpOTLPSpanExporter,
-    _resolve_otlp_exporter_class,
 )
 
 
@@ -63,17 +63,17 @@ def test_sdk_disabled_is_case_insensitive(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_otlp_protocol_defaults_to_grpc() -> None:
-    assert _resolve_otlp_exporter_class() is _GrpcOTLPSpanExporter
+    assert isinstance(_build_otlp_exporter(timeout=None), _GrpcOTLPSpanExporter)
 
 
 def test_otlp_protocol_grpc_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
-    assert _resolve_otlp_exporter_class() is _GrpcOTLPSpanExporter
+    assert isinstance(_build_otlp_exporter(timeout=None), _GrpcOTLPSpanExporter)
 
 
 def test_otlp_protocol_http_protobuf(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
-    assert _resolve_otlp_exporter_class() is _HttpOTLPSpanExporter
+    assert isinstance(_build_otlp_exporter(timeout=None), _HttpOTLPSpanExporter)
 
 
 def test_otlp_traces_protocol_wins_over_general_protocol(
@@ -81,10 +81,10 @@ def test_otlp_traces_protocol_wins_over_general_protocol(
 ) -> None:
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/protobuf")
-    assert _resolve_otlp_exporter_class() is _HttpOTLPSpanExporter
+    assert isinstance(_build_otlp_exporter(timeout=None), _HttpOTLPSpanExporter)
 
 
 def test_otlp_protocol_unsupported_value_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json")
     with pytest.raises(ValueError, match="http/json"):
-        _resolve_otlp_exporter_class()
+        _build_otlp_exporter(timeout=None)

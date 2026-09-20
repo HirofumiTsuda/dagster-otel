@@ -26,7 +26,7 @@ from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
 )
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter
 
 #: The only two OTLP transports opentelemetry-python itself implements -- the spec
 #: (https://opentelemetry.io/docs/languages/sdk-configuration/otlp-exporter/) also
@@ -54,10 +54,11 @@ _OTLP_EXPORTER_BY_PROTOCOL = {
 _DEFAULT_OTLP_TIMEOUT_SECONDS = 2.0
 
 
-def _resolve_otlp_exporter_class() -> type:
-    """Which OTLPSpanExporter class to use, per `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL`/
-    `OTEL_EXPORTER_OTLP_PROTOCOL` (signal-specific var wins, matching the spec's own
-    precedence for every other OTEL_EXPORTER_OTLP_* pair this module already honors).
+def _build_otlp_exporter(timeout: float | None) -> SpanExporter:
+    """Build the OTLPSpanExporter for whatever transport
+    `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL`/`OTEL_EXPORTER_OTLP_PROTOCOL` selects
+    (signal-specific var wins, matching the spec's own precedence for every other
+    OTEL_EXPORTER_OTLP_* pair this module already honors).
 
     Defaults to the gRPC exporter when neither is set, preserving this project's
     existing documented/verified behavior for anyone not setting the var (Issue #48).
@@ -68,13 +69,14 @@ def _resolve_otlp_exporter_class() -> type:
         or "grpc"
     ).strip()
     try:
-        return _OTLP_EXPORTER_BY_PROTOCOL[protocol]
+        exporter_class = _OTLP_EXPORTER_BY_PROTOCOL[protocol]
     except KeyError:
         raise ValueError(
             f"Unsupported OTLP protocol {protocol!r} (from OTEL_EXPORTER_OTLP_TRACES_PROTOCOL "
             "/ OTEL_EXPORTER_OTLP_PROTOCOL) -- dagster-otel supports 'grpc' and "
             "'http/protobuf', the two opentelemetry-python itself implements."
         ) from None
+    return exporter_class(timeout=timeout)
 
 
 def _export_configured() -> bool:
@@ -136,7 +138,7 @@ def configure() -> None:
 
     Transport defaults to gRPC, same as always, but honors
     `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL`/`OTEL_EXPORTER_OTLP_PROTOCOL` if set (Issue
-    #48) -- see `_resolve_otlp_exporter_class()`. Only `grpc` and `http/protobuf` are
+    #48) -- see `_build_otlp_exporter()`. Only `grpc` and `http/protobuf` are
     supported (the two opentelemetry-python itself implements); anything else raises
     rather than silently falling back, so a typo'd protocol value fails loudly instead
     of quietly keeping gRPC.
@@ -151,8 +153,6 @@ def configure() -> None:
     )
     timeout = None if has_explicit_timeout else _DEFAULT_OTLP_TIMEOUT_SECONDS
 
-    exporter_class = _resolve_otlp_exporter_class()
-
     provider = TracerProvider(resource=Resource.create())
-    provider.add_span_processor(SimpleSpanProcessor(exporter_class(timeout=timeout)))
+    provider.add_span_processor(SimpleSpanProcessor(_build_otlp_exporter(timeout)))
     trace.set_tracer_provider(provider)

@@ -1157,6 +1157,47 @@ real but insufficient on their own to fix it.
     `description` field instead, the one thing that *is* persisted and visible to
     whoever hits this next.
 
+### The actual fix: the traces panel was the wrong panel type all along (2026-09-20)
+
+The two session/toggle items above were both real and both reproduced, but neither
+one was the actual, reproducible cause -- they explained specific *instances* of "No
+data found in response," not why it kept recurring. Walking through it again with a
+fresh login and the toggle confirmed off, the panel still showed no data, with the
+browser's Network tab showing the `ds_type=tempo` request wasn't even being sent
+(only the three `ds_type=prometheus` requests for the other panels were). Root
+cause, found along the way:
+
+- **The `grafana` container's `dev/grafana/dashboards` bind mount had come up
+  empty.** `docker compose exec grafana ls /var/lib/grafana/dashboards/` showed
+  nothing, while the same path on the host had the real file -- Docker had bound an
+  empty directory at container-creation time (this directory was created after the
+  container's first `docker compose up`) and, on this Docker Desktop/WSL2 setup,
+  never picked up the host directory's contents afterward. `docker compose up -d
+  --force-recreate grafana` fixed it (confirmed: the file appeared inside the
+  container immediately after). Worth remembering for any bind-mounted directory
+  created after its container's first start, not just this one.
+- **Once the panel could actually load, "No data found in response" turned out to
+  be structurally correct, not a bug at all.** The dashboard's target is a TraceQL
+  **search** query (`{resource.service.name="..."}`, matching however many traces
+  fit the filter) -- confirmed by reading the panel's own `/api/ds/query` response
+  directly: its frame schema carries `"meta": {"preferredVisualisationType":
+  "table"}`. Tempo itself is saying this result is table-shaped. Grafana's native
+  **traces** panel renders a single trace's span tree (parent/child span
+  hierarchy) -- structurally incompatible with a multi-trace search result,
+  regardless of session state or UI toggles. **Fixed** by changing the panel's
+  `type` from `"traces"` to `"table"` in `combined-demo-dashboard.json` -- the
+  Trace ID column keeps its drill-down link (`internal.query` in the field config)
+  into the full waterfall view, so nothing is lost, it's just a click away instead
+  of inline. Verified against a real run's data (screenshots in
+  `examples/README.md`).
+
+This is also the reason the "Table view" toggle and session-rotation items above
+*looked* like they explained the problem: both are real, independent ways to get
+the exact same "No data found in response" message on any panel, so each one was a
+plausible-looking, and wrong, explanation for a problem that was actually
+structural. The lesson generalizes: prefer reading the actual API response over
+reasoning from the frontend's (often reused, generic) error message.
+
 ## Open questions
 
 None currently tracked -- multi-root/fan-in (#5), k8s_job_executor (#3), and

@@ -48,6 +48,29 @@ should see a `jaffle_shop_dbt_assets` span with one child span per dbt node
 nested underneath) -- confirmed real, accurate durations per node, not zero-width
 markers (see Issue #8 / `docs/design.md`).
 
+### Against Grafana Tempo instead (through a real OTel Collector)
+
+`docker compose up -d` also starts `tempo` and `otel-collector` (Issue #42) -- point
+at the Collector, not Tempo directly, since that's the real deployment shape this
+verifies:
+
+```sh
+DAGSTER_HOME=/tmp/dagster-otel-jaffle-shop \
+OTEL_SERVICE_NAME=jaffle_shop_example \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4327 \
+uv run dagster asset materialize -f examples/dagster_workspace/definitions.py --select '*'
+```
+
+Tempo has no UI of its own to click through -- query its API instead:
+
+```sh
+curl -s --get http://localhost:3200/api/search --data-urlencode 'q={}' | python3 -m json.tool
+```
+
+Find the trace with `serviceStats.jaffle_shop_example.spanCount: 16`, then
+`curl http://localhost:3200/api/traces/<traceID>` for the full span tree (same
+`step -> asset -> check` shape as the Jaeger case above, see `docs/design.md`).
+
 ### Log correlation
 
 `capturing_logger` in `definitions.py` needs to be explicitly selected via run

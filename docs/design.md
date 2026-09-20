@@ -925,6 +925,49 @@ sort) + real Jaeger: the span's `dagster.asset_keys` attribute reads
 `"alpha_asset,zeta_asset"` -- both present, correctly sorted, on exactly the case
 `context.asset_key` itself cannot handle.
 
+## Verified against a real Grafana Tempo backend, through a real OTel Collector (Issue #42, 2026-09-20)
+
+Every prior verification in this doc used Jaeger. `configure()`'s whole premise --
+`OTLPSpanExporter()` with no `endpoint=`/`headers=`/`credentials=`, so anything
+speaking OTLP should work purely via env vars -- had never actually been checked
+against a second backend.
+
+Added `tempo` and `otel-collector` services to `docker-compose.yaml` (`dev/tempo.yaml`
+adapted from Grafana's own official single-binary example, `dev/otel-collector-
+config.yaml` a plain `otlp` receiver forwarding to Tempo). Deliberately routed through
+a real OTel Collector rather than pointing `OTEL_EXPORTER_OTLP_ENDPOINT` straight at
+Tempo -- this project had never been verified against an actual Collector hop either,
+and a real deployment fronting multiple instrumented services with one Collector is a
+more realistic shape than every prior Jaeger check exercised.
+
+Two things confirmed, both against the real `examples/` jaffle_shop `@dbt_assets`
+pipeline (not a hand-written toy trace):
+
+- A manual span round-trips through `dagster-otel -> Collector -> Tempo` correctly
+  first (`GET /api/traces/<id>` on Tempo's query API returned the right resource
+  attributes and span), before trying anything more complex.
+- The real pipeline produces the exact same 16-span `step -> asset -> check` shape
+  already documented for Jaeger: `jaffle_shop_dbt_assets` (root) parenting
+  `raw_customers`/`stg_customers`/`customers`, each in turn parenting its own dbt test
+  spans (4 checks each). Confirmed via Tempo's search API
+  (`serviceStats.jaffle_shop_tempo_verification.spanCount: 16`) and by walking the
+  full trace's parent/child edges directly, not just trusting a span count.
+
+Tempo's `grafana/tempo:latest` image (pulled 2026-09-20) logs `live_store`/
+`partition`-related lines on startup that don't appear in older single-binary-mode
+docs -- newer Tempo versions have a different internal ingestion architecture than
+the classic local-storage-only single binary. Didn't investigate further since
+`storage.trace.backend: local` (this config) still worked end-to-end regardless; flag
+this in case a future Tempo version genuinely requires something this config doesn't
+provide (a Kafka-compatible queue was mentioned in some current Tempo docs, though not
+needed here).
+
+No Grafana instance in this setup yet (Tempo only exposes an API, no UI of its own) --
+unlike the Jaeger case, no accompanying UI screenshot for the README. Adding Grafana
+on top (with a Tempo datasource) would be a natural addition when
+[#56](https://github.com/HirofumiTsuda/dagster-otel/issues/56)'s combined
+exporter+traces demo adds Prometheus too, rather than doing it twice.
+
 ## Open questions
 
 None currently tracked -- multi-root/fan-in (#5), k8s_job_executor (#3), and

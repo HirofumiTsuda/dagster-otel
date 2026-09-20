@@ -5,3 +5,31 @@ services:
       - "4317:4317"   # OTLP gRPC -- point OTEL_EXPORTER_OTLP_ENDPOINT here
       - "4318:4318"   # OTLP HTTP
       - "16686:16686" # UI -- http://localhost:16686
+
+  # Grafana Tempo backend (Issue #42) plus a real OTel Collector in front of it
+  # (Issue #56's architecture) -- offset host ports from jaeger's above so both stacks
+  # can run at once via a plain `docker compose up`; point OTEL_EXPORTER_OTLP_ENDPOINT
+  # at the collector (4327/4328), not directly at tempo, to exercise the Collector
+  # hop this project doesn't otherwise get tested against.
+  tempo:
+    image: grafana/tempo:latest
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./dev/tempo.yaml:/etc/tempo.yaml
+      - tempo-data:/var/tempo
+    ports:
+      - "3200:3200" # Tempo query API -- used by Grafana's Tempo datasource (Issue #56)
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./dev/otel-collector-config.yaml:/etc/otel-collector-config.yaml
+    ports:
+      - "4327:4317" # OTLP gRPC -- point OTEL_EXPORTER_OTLP_ENDPOINT here for the Tempo/Collector path
+      - "4328:4318" # OTLP HTTP
+    depends_on:
+      - tempo
+
+volumes:
+  tempo-data:

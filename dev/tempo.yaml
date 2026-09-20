@@ -1,0 +1,32 @@
+# Minimal Tempo config for local dev/verification (Issue #42) -- adapted from Grafana's
+# own official single-binary example
+# (github.com/grafana/tempo/tree/main/example/docker-compose/single-binary), with the
+# metrics_generator's remote_write to Prometheus dropped: this repo doesn't run a
+# Prometheus alongside Tempo (yet -- see Issue #56 for the combined-demo follow-up that
+# would add one), and pointing remote_write at a service that doesn't exist would just
+# be a startup-time error for a feature nothing here uses.
+stream_over_http_enabled: true
+
+server:
+  http_listen_port: 3200
+  log_level: info
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "tempo:4317"
+        http:
+          endpoint: "tempo:4318"
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+
+usage_report:
+  reporting_enabled: false

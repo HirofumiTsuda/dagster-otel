@@ -73,6 +73,31 @@ Find the trace with `serviceStats.jaffle_shop_example.spanCount: 16`, then
 
 ### Combined demo: traces + dagster-prometheus-exporter's metrics, in Grafana
 
+```mermaid
+flowchart LR
+    assets["jaffle_shop_dbt_assets<br/>(dagster dev, traced_dbt())"]
+    exporter["dagster-prometheus-exporter<br/>(/metrics)"]
+    collector["otel-collector"]
+    tempo[("Tempo")]
+    prometheus[("Prometheus")]
+    grafana["Grafana"]
+
+    assets -- "OTLP traces" --> collector
+    exporter -- "GraphQL query" --> assets
+    collector -- "scrapes :9101/metrics" --> exporter
+    collector -- "otlp/tempo exporter" --> tempo
+    collector -- "prometheusremotewrite" --> prometheus
+    tempo -- "Tempo datasource" --> grafana
+    prometheus -- "Prometheus datasource" --> grafana
+```
+
+Two independent pipelines share the same Collector: traces flow straight through
+(OTLP receiver -> `otlp/tempo` exporter), while metrics get pulled from the
+exporter's `/metrics` (the Collector's `prometheus` receiver scrapes it, same as a
+standalone Prometheus server would) and pushed onward via `prometheusremotewrite`
+-- see `dev/otel-collector-config.yaml` and `docs/design.md` for why metrics don't
+just flow through Prometheus's own scraping instead.
+
 `docker compose up -d` also starts `jaffle-shop` (this same pipeline, but as a
 persistent `dagster dev` webserver rather than a one-shot `dagster asset
 materialize`), `exporter` (dagster-prometheus-exporter, pointed at that webserver),

@@ -1,0 +1,6 @@
+# No scrape_configs needed -- metrics arrive via remote-write from the OTel Collector
+# (dev/otel-collector-config.yaml's prometheusremotewrite exporter), which is the one
+# actually scraping dagster-prometheus-exporter's /metrics (Issue #56). This
+# Prometheus's own job is just to accept and store that, and serve it to Grafana.
+global:
+  scrape_interval: 15s

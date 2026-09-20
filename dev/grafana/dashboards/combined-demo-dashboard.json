@@ -1,0 +1,72 @@
+{
+  "uid": "dagster-otel-combined-demo",
+  "title": "dagster-otel combined demo",
+  "tags": ["dagster-otel", "dagster-prometheus-exporter", "combined-demo"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Active Runs",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(dagster_active_runs)",
+          "legendFormat": "active",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2,
+      "title": "Latest Run Status",
+      "type": "table",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "dagster_last_run_info",
+          "format": "table",
+          "instant": true,
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 0 }
+    },
+    {
+      "id": 3,
+      "title": "Last Run Duration",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "dagster_last_run_duration_seconds",
+          "legendFormat": "{{job_name}}",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 }
+    },
+    {
+      "id": 4,
+      "title": "jaffle_shop_dbt_assets traces",
+      "description": "The trace half of this same run -- set OTEL_SERVICE_NAME to match your own pipeline's service name if you're pointing this at something other than the jaffle_shop example.",
+      "type": "traces",
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "targets": [
+        {
+          "queryType": "traceql",
+          "query": "{resource.service.name=\"jaffle_shop_combined_demo\"}",
+          "limit": 20,
+          "datasource": { "type": "tempo", "uid": "tempo" }
+        }
+      ],
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 6 }
+    }
+  ],
+  "templating": { "list": [] }
+}

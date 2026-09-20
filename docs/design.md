@@ -968,6 +968,92 @@ on top (with a Tempo datasource) would be a natural addition when
 [#56](https://github.com/HirofumiTsuda/dagster-otel/issues/56)'s combined
 exporter+traces demo adds Prometheus too, rather than doing it twice.
 
+## Combined demo: traces + exporter metrics through one Collector, in Grafana (Issue #56, 2026-09-20)
+
+Follow-up to the Tempo verification above, which flagged this as the natural next
+step rather than adding Grafana twice.
+
+Two sibling projects (this one, and
+[dagster-prometheus-exporter](https://github.com/HirofumiTsuda/dagster-prometheus-exporter))
+had never been demonstrated working together before, despite being a natural pair.
+`dev/otel-collector-config.yaml` now has two independent pipelines, not one:
+
+- **Traces** (unchanged from the Tempo verification above): `otlp` receiver ->
+  `otlp/tempo` exporter.
+- **Metrics** (new): a `prometheus` receiver scrapes
+  `dagster-prometheus-exporter`'s `/metrics` (same thing a standalone Prometheus
+  server would do), then a `prometheusremotewrite` exporter forwards to the
+  Prometheus this demo also runs.
+
+Tempo has no metrics ingestion (traces-only, see above), so this isn't literally
+"one Collector, one backend" the way #56's original SigNoz-shaped diagram pictured
+-- the Collector is still the thing both signal types pass through, which is the
+part that actually matters here, and Grafana (new in this stack, with both a
+Prometheus and a Tempo datasource provisioned) is where a human actually looks at
+both together.
+
+New pieces:
+
+- `dev/jaffle-shop-dev.Dockerfile` -- runs `examples/dagster_workspace` (the
+  jaffle_shop pipeline verified against Jaeger and Tempo above) as a persistent
+  `dagster dev` webserver, not the one-shot `dagster asset materialize`
+  `examples/README.md`'s basic walkthrough uses. Needed because
+  `dagster-prometheus-exporter` scrapes a live GraphQL endpoint, which a one-shot
+  command never exposes. Needed a new `demo` dependency group
+  (`dagster-webserver`, pinned to the same 1.13.22 `dagster` itself resolves to)
+  -- this library itself never needs a running webserver, so it stayed out of the
+  base dependencies, same reasoning as the existing `dbt` group.
+- `exporter` service: the sibling project's own published image
+  (`ghcr.io/hirofumitsuda/dagster-prometheus-exporter:latest`), pointed at the
+  jaffle-shop container's GraphQL endpoint. Zero changes needed to that project,
+  exactly as #56 anticipated -- it's referenced as an external image, not vendored
+  or built from source here.
+- `prometheus`/`grafana` services, mirroring `dagster-prometheus-exporter`'s own
+  dev-stack conventions (same author, same shape) rather than inventing a
+  different one.
+
+Verified against a real materialization, not just each piece in isolation:
+launched a real run via GraphQL against the jaffle-shop webserver, and confirmed
+both signal types landed from that one run --
+
+```
+$ curl -s --get http://localhost:3200/api/search --data-urlencode 'q={}' | ...
+"jaffle_shop_combined_demo": {"spanCount": 16}   # same step->asset->check shape as before
+
+$ curl -s http://localhost:9090/api/v1/query?query=dagster_last_run_info | ...
+{"status": "success"}   # the exporter's own metric, having passed through the Collector's
+                         # prometheus receiver -> prometheusremotewrite -> this Prometheus
+```
+
+Both datasources confirmed provisioned and reachable via Grafana's own API
+(`GET /api/datasources`), not just assumed from the YAML.
+
+`dev/grafana/dashboards/combined-demo-dashboard.json` (auto-provisioned into a
+"dagster-otel" folder) ships three Prometheus-backed panels (active runs, latest
+run status, last run duration) and one native Grafana **traces** panel querying
+Tempo directly via TraceQL (`{resource.service.name="jaffle_shop_combined_demo"}`)
+-- not a link out to Tempo's own UI (it has none), an actual in-dashboard trace
+list. Built and validated against a real running Grafana instance via its HTTP API
+(`POST /api/dashboards/db`, then queried each panel's data via `POST
+/api/ds/query` to confirm real values came back) before writing the file, rather
+than hand-authoring dashboard JSON and hoping the schema was right.
+
+The datasource `uid`s are pinned explicitly in `dev/grafana/provisioning/
+datasources/datasource.yml` (`prometheus` for Prometheus,
+`tempo` for Tempo) specifically because the dashboard JSON references
+them by uid -- leaving Grafana to auto-generate one per fresh install would silently
+break the dashboard's datasource links every time the stack is torn down and
+recreated. Verified by actually doing that: removed the running Grafana container
+and recreated it from a clean state, confirmed both the pinned uids and the
+dashboard (still resolving real trace data) came back identically.
+
+One real debugging catch worth noting: a manual span sent straight from the host to
+the Tempo/Collector path (via the host-mapped port) landed and searched
+immediately, but the *first* check of the real materialization's trace (queried
+right after the run finished) came back empty -- re-querying moments later found it
+with the full 16 spans. Tempo's search index has some lag after ingestion; don't
+treat an immediate empty search as "it didn't arrive."
+
 ## Open questions
 
 None currently tracked -- multi-root/fan-in (#5), k8s_job_executor (#3), and

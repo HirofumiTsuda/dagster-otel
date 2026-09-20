@@ -1,0 +1,22 @@
+# Both signal types this demo produces, so Issue #56's actual point -- one place to
+# look at traces (dagster-otel) and metrics (dagster-prometheus-exporter) together --
+# is checkable in Grafana's UI, not just via each backend's own raw API.
+#
+# uid is set explicitly (not left to auto-generate) because
+# dev/grafana/dashboards/combined-demo-dashboard.json's panels reference these
+# datasources by uid -- letting Grafana generate a random one per fresh install would
+# break that dashboard every time the stack is torn down and recreated.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200

@@ -20,6 +20,7 @@ from dagster_otel._setup import (
     _export_configured,
     _GrpcOTLPSpanExporter,
     _HttpOTLPSpanExporter,
+    _trace_id_from_run_id,
 )
 
 
@@ -101,6 +102,22 @@ def _clear_current_run_id():
     token = _current_run_id.set(None)
     yield
     _current_run_id.reset(token)
+
+
+def test_trace_id_from_run_id_matches_hash_formula() -> None:
+    """The documented derivation, spelled out independently of the implementation --
+    sha256(run_id)[:16 bytes], big-endian -- so anyone reading a trace_id in a real
+    backend can independently confirm which run it came from."""
+    expected = int.from_bytes(hashlib.sha256(b"run-A").digest()[:16], "big")
+    assert _trace_id_from_run_id("run-A") == expected
+
+
+def test_trace_id_from_run_id_is_deterministic() -> None:
+    assert _trace_id_from_run_id("run-A") == _trace_id_from_run_id("run-A")
+
+
+def test_trace_id_from_run_id_differs_per_run() -> None:
+    assert _trace_id_from_run_id("run-A") != _trace_id_from_run_id("run-B")
 
 
 def test_deterministic_id_generator_same_run_id_same_trace_id() -> None:

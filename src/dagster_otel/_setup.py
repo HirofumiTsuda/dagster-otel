@@ -46,6 +46,17 @@ _current_run_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 
 
+def _trace_id_from_run_id(run_id: str) -> int:
+    """Deterministically derive a 128-bit OTel trace_id from a Dagster run_id.
+
+    Hashed rather than parsed as a UUID directly -- this doesn't assume run_id is
+    always UUID-shaped, only that it's some string that uniquely identifies the
+    run. SHA-256's first 16 bytes (128 bits, matching OTel's trace_id size),
+    big-endian (the byte order `format_trace_id`/OTLP exporters use elsewhere).
+    """
+    return int.from_bytes(hashlib.sha256(run_id.encode()).digest()[:16], "big")
+
+
 class _DeterministicRunIdGenerator(IdGenerator):
     """span_id is ordinary random (delegated to RandomIdGenerator); trace_id is
     deterministic -- derived from `_current_run_id` when set, so every step of a run
@@ -76,7 +87,7 @@ class _DeterministicRunIdGenerator(IdGenerator):
         run_id = _current_run_id.get()
         if run_id is None:
             return self._random.generate_trace_id()
-        return int.from_bytes(hashlib.sha256(run_id.encode()).digest()[:16], "big")
+        return _trace_id_from_run_id(run_id)
 
 
 #: The only two OTLP transports opentelemetry-python itself implements -- the spec

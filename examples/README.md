@@ -95,6 +95,18 @@ by Prometheus directly), then forwarded via `prometheusremotewrite` -- see
 `docs/design.md` for why, and for the "Tempo's search index lags ingestion by a few
 seconds" gotcha that also applies here.
 
+![The combined demo dashboard: run/metric panels from dagster-prometheus-exporter alongside a table of recent traces from this project](../docs/images/combined-demo-dashboard.png)
+*Metrics and traces from the same runs, side by side in one dashboard. The traces
+panel is a table (not Grafana's native traces panel) -- the underlying TraceQL
+**search** query matches multiple traces, which Tempo itself returns as
+table-shaped data (`preferredVisualisationType: "table"`); the native traces panel
+only renders a single trace's span tree. Click a Trace ID to drill into the full
+waterfall.*
+
+![Clicking a Trace ID from the table drills into the full waterfall view in Explore](../docs/images/tempo-trace-waterfall.png)
+*The same `step -> asset -> check` span tree as the Jaeger example above, this time
+via Tempo.*
+
 ### Log correlation
 
 `capturing_logger` in `definitions.py` needs to be explicitly selected via run

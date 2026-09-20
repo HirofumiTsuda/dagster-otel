@@ -55,8 +55,8 @@
     {
       "id": 4,
       "title": "jaffle_shop_dbt_assets traces",
-      "description": "The trace half of this same run -- set OTEL_SERVICE_NAME to match your own pipeline's service name if you're pointing this at something other than the jaffle_shop example. If this shows \"No data found in response\" with everything else looking right, the data itself is fine -- check (1) your Grafana session hasn't gone stale (re-login) and (2) the query editor's \"Table view\" toggle is off. Both are per-viewer/session state, not saved in this dashboard.",
-      "type": "traces",
+      "description": "The trace half of this same run -- set OTEL_SERVICE_NAME to match your own pipeline's service name if you're pointing this at something other than the jaffle_shop example. This is a TraceQL *search* query (matches many traces), which Tempo itself returns as table-shaped data (see the response's own `preferredVisualisationType: \"table\"`) -- the native traces panel can only render a single trace's span tree, not a multi-trace search result, so this uses a table panel instead. Click a Trace ID to drill into that trace's full waterfall view.",
+      "type": "table",
       "datasource": { "type": "tempo", "uid": "tempo" },
       "targets": [
         {

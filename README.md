@@ -106,15 +106,6 @@ whole `dbt build` -- see the screenshot at the top of this README (the real
 jaffle_shop example: 16 spans, 1 step + 3 assets + 12 checks), each with the
 accurate duration dbt itself measured.
 
-`@traced()` doesn't belong on a `@graph_asset`'s own decorated function --
-that function is a definition-time *composition* of other ops (it wires up
-which `@op` depends on which, called once at definition time), not a
-per-run `compute_fn`, so it never receives a runtime `context` for `traced()`
-to use in the first place. Put `@traced()` on the individual `@op`s the
-`graph_asset` composes instead -- those run at execution time with a real
-`context`, same as any other op, and tracing them already covers everything
-that actually executes under the graph asset.
-
 ## Configuration
 
 Standard OTel environment variables -- nothing bespoke:

@@ -15,6 +15,8 @@ building a parallel config surface. Set OTEL_SERVICE_NAME / OTEL_EXPORTER_OTLP_E
 (or OTEL_EXPORTER_OTLP_TRACES_ENDPOINT) instead of passing values here.
 """
 
+import contextvars
+import hashlib
 import os
 
 from opentelemetry import trace
@@ -27,6 +29,66 @@ from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter
+from opentelemetry.sdk.trace.id_generator import IdGenerator, RandomIdGenerator
+
+#: Set by _propagation.py's _seed_run_root_context(), immediately before starting a
+#: span that found no real parent to attach to -- read by
+#: _DeterministicRunIdGenerator below, never reset afterwards. Safe not to reset:
+#: this is only ever *consulted* (via generate_trace_id(), itself only called by
+#: the SDK for a span with no valid parent context at all) on the same code path
+#: that always sets a fresh, correct value immediately beforehand -- a span with a
+#: real parent never triggers generate_trace_id() in the first place (see
+#: opentelemetry-sdk's Tracer.start_span, verified 1.44.0: the parent branch reads
+#: parent_span_context.trace_id directly, the id_generator is only consulted in the
+#: no-valid-parent branch).
+_current_run_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "dagster_otel_current_run_id", default=None
+)
+
+
+def _trace_id_from_run_id(run_id: str) -> int:
+    """Deterministically derive a 128-bit OTel trace_id from a Dagster run_id.
+
+    Hashed rather than parsed as a UUID directly -- this doesn't assume run_id is
+    always UUID-shaped, only that it's some string that uniquely identifies the
+    run. SHA-256's first 16 bytes (128 bits, matching OTel's trace_id size),
+    big-endian (the byte order `format_trace_id`/OTLP exporters use elsewhere).
+    """
+    return int.from_bytes(hashlib.sha256(run_id.encode()).digest()[:16], "big")
+
+
+class _DeterministicRunIdGenerator(IdGenerator):
+    """span_id is ordinary random (delegated to RandomIdGenerator); trace_id is
+    deterministic -- derived from `_current_run_id` when set, so every step of a run
+    that has no real parent to attach to still lands in the same trace as the rest
+    of that run, the same property `_seed_run_root_context` has always provided.
+
+    Issue #63: the previous approach got that shared trace_id by *attaching a fake
+    parent span context* (a `NonRecordingSpan` with a placeholder `span_id=0x1`)
+    before starting the span -- which the SDK dutifully recorded as a real
+    `parent_span_id` on the resulting span, even though no span with that ID was
+    ever created. Trace-tree tools that structurally resolve a trace's root
+    (confirmed: Grafana's native traces panel, backed by Tempo) then wait
+    indefinitely for a parent span that will never arrive. Generating the trace_id
+    at the SDK's `IdGenerator` level instead avoids that entirely: per
+    `Tracer.start_span` (verified against opentelemetry-sdk 1.44.0), a span created
+    with no valid parent context always gets `parent_span_id` left unset,
+    regardless of what `generate_trace_id()` returns -- there's no parent-context
+    object here for the SDK to record a reference to in the first place.
+    """
+
+    def __init__(self) -> None:
+        self._random = RandomIdGenerator()
+
+    def generate_span_id(self) -> int:
+        return self._random.generate_span_id()
+
+    def generate_trace_id(self) -> int:
+        run_id = _current_run_id.get()
+        if run_id is None:
+            return self._random.generate_trace_id()
+        return _trace_id_from_run_id(run_id)
+
 
 #: The only two OTLP transports opentelemetry-python itself implements -- the spec
 #: (https://opentelemetry.io/docs/languages/sdk-configuration/otlp-exporter/) also
@@ -142,9 +204,18 @@ def configure() -> None:
     supported (the two opentelemetry-python itself implements); anything else raises
     rather than silently falling back, so a typo'd protocol value fails loudly instead
     of quietly keeping gRPC.
+
+    Uses `_DeterministicRunIdGenerator` (Issue #63) rather than the SDK's default
+    `RandomIdGenerator`, so `_propagation.py`'s `_seed_run_root_context` can give
+    every parentless step of a run the same `trace_id` without attaching a fake
+    parent span context to carry it -- see that class's docstring for the full
+    story. Both branches above construct their own `TracerProvider`, so this
+    applies regardless of whether a real exporter ends up attached.
     """
     if not _export_configured():
-        trace.set_tracer_provider(TracerProvider(resource=Resource.create()))
+        trace.set_tracer_provider(
+            TracerProvider(resource=Resource.create(), id_generator=_DeterministicRunIdGenerator())
+        )
         return
 
     has_explicit_timeout = bool(
@@ -153,6 +224,8 @@ def configure() -> None:
     )
     timeout = None if has_explicit_timeout else _DEFAULT_OTLP_TIMEOUT_SECONDS
 
-    provider = TracerProvider(resource=Resource.create())
+    provider = TracerProvider(
+        resource=Resource.create(), id_generator=_DeterministicRunIdGenerator()
+    )
     provider.add_span_processor(SimpleSpanProcessor(_build_otlp_exporter(timeout)))
     trace.set_tracer_provider(provider)

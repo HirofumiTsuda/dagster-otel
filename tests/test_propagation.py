@@ -21,6 +21,7 @@ from dagster_otel._propagation import (
     find_upstream_trace_contexts,
     publish_trace_context,
 )
+from dagster_otel._setup import _current_run_id
 
 
 def test_own_step_key_is_dotted_op_path() -> None:
@@ -259,22 +260,22 @@ def test_find_upstream_trace_contexts_falls_back_to_ancestor_run() -> None:
     assert len(find_upstream_trace_contexts(retry_ctx)) == 1
 
 
-def test_seed_run_root_context_is_deterministic_per_run() -> None:
+def test_seed_run_root_context_sets_current_run_id() -> None:
+    """_seed_run_root_context itself just records which run this is (Issue #63) --
+    _DeterministicRunIdGenerator (tests/test_setup.py) is what turns that into a
+    deterministic trace_id, no OTel context activated here at all any more."""
     ctx_a1 = make_context(FakeInstance(), "run-A", ["op1"])
     ctx_a2 = make_context(FakeInstance(), "run-A", ["op2"])
     ctx_b = make_context(FakeInstance(), "run-B", ["op1"])
 
     _seed_run_root_context(ctx_a1)
-    trace_id_a1 = trace.get_current_span().get_span_context().trace_id
+    assert _current_run_id.get() == "run-A"
 
     _seed_run_root_context(ctx_a2)
-    trace_id_a2 = trace.get_current_span().get_span_context().trace_id
+    assert _current_run_id.get() == "run-A"
 
     _seed_run_root_context(ctx_b)
-    trace_id_b = trace.get_current_span().get_span_context().trace_id
-
-    assert trace_id_a1 == trace_id_a2  # same run_id -> same trace_id, no coordination
-    assert trace_id_a1 != trace_id_b  # different run_id -> different trace_id
+    assert _current_run_id.get() == "run-B"
 
 
 def test_find_previous_attempt_context_none_on_first_attempt() -> None:

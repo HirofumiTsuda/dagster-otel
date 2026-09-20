@@ -23,6 +23,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from dagster_otel._setup import _DeterministicRunIdGenerator
 from dagster_otel._types import ExecutionContext
 
 
@@ -37,9 +38,14 @@ def _otel_test_provider() -> InMemorySpanExporter:
     when @traced() calls the real configure() during a test, it's a guaranteed no-op,
     and every span still lands in this in-memory exporter instead of attempting a real
     OTLP network call.
+
+    Uses _DeterministicRunIdGenerator, same as configure() itself, not the SDK's
+    default -- otherwise tests exercising the deterministic-trace_id-for-parentless-
+    steps behavior (Issue #63) would see plain random trace_ids instead, since that
+    behavior lives in the IdGenerator, not anything these tests directly call.
     """
     exporter = InMemorySpanExporter()
-    provider = TracerProvider()
+    provider = TracerProvider(id_generator=_DeterministicRunIdGenerator())
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     trace.set_tracer_provider(provider)
     return exporter

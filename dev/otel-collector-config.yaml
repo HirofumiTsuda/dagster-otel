@@ -1,9 +1,16 @@
-# Real OTel Collector in the dev stack (Issue #42, and the trace half of Issue #56's
-# combined-demo architecture) -- dagster-otel points OTEL_EXPORTER_OTLP_ENDPOINT here
-# instead of directly at a backend, same as a real deployment fronting multiple
-# instrumented services with one Collector. Traces-only for now; Issue #56 adds a
-# prometheus receiver here to also scrape dagster-prometheus-exporter's /metrics and
-# forward both signal types through this same Collector.
+# Real OTel Collector in the dev stack (Issue #42, and Issue #56's combined-demo
+# architecture) -- dagster-otel points OTEL_EXPORTER_OTLP_ENDPOINT here instead of
+# directly at a backend, same as a real deployment fronting multiple instrumented
+# services with one Collector.
+#
+# Two independent pipelines, not one: traces (dagster-otel -> this Collector -> Tempo)
+# and metrics (this Collector scrapes dagster-prometheus-exporter's /metrics via the
+# prometheus receiver -- same as a standalone Prometheus server would -- then forwards
+# via prometheusremotewrite to the same Prometheus this demo also runs). Tempo has no
+# metrics ingestion (traces-only backend, see docs/design.md), so "one Collector, one
+# backend" per Issue #56's original SigNoz-shaped diagram isn't literally one backend
+# here -- the Collector is still the thing both signal types pass through, which is
+# the part this demo actually verifies.
 receivers:
   otlp:
     protocols:
@@ -11,10 +18,21 @@ receivers:
         endpoint: 0.0.0.0:4317
       http:
         endpoint: 0.0.0.0:4318
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: dagster-prometheus-exporter
+          scrape_interval: 10s
+          static_configs:
+            - targets: ["exporter:9101"]
 
 exporters:
   otlp/tempo:
     endpoint: tempo:4317
+    tls:
+      insecure: true
+  prometheusremotewrite:
+    endpoint: http://prometheus:9090/api/v1/write
     tls:
       insecure: true
 
@@ -23,3 +41,6 @@ service:
     traces:
       receivers: [otlp]
       exporters: [otlp/tempo]
+    metrics:
+      receivers: [prometheus]
+      exporters: [prometheusremotewrite]

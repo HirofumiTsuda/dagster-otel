@@ -62,6 +62,14 @@ dbt = [
     "dagster-dbt==0.29.22",
     "dbt-duckdb",
 ]
+# Only needed to run `dagster dev` as a persistent webserver (Issue #56's combined
+# demo, dev/jaffle-shop-dev.Dockerfile) -- this library itself never needs a running
+# webserver, so keeping it out of the base dependencies matches the dbt group's own
+# reasoning above. Pinned to the same 1.13.22 dagster itself resolves to here, same
+# "don't let versions drift apart silently" concern as the lint group's pins.
+demo = [
+    "dagster-webserver==1.13.22",
+]
 
 [project.urls]
 Home = "https://github.com/HirofumiTsuda/dagster-otel"

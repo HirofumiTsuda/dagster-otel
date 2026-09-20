@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: "dagster-otel"
+    orgId: 1
+    folder: "dagster-otel"
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards

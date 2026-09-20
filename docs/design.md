@@ -968,6 +968,236 @@ on top (with a Tempo datasource) would be a natural addition when
 [#56](https://github.com/HirofumiTsuda/dagster-otel/issues/56)'s combined
 exporter+traces demo adds Prometheus too, rather than doing it twice.
 
+## Combined demo: traces + exporter metrics through one Collector, in Grafana (Issue #56, 2026-09-20)
+
+Follow-up to the Tempo verification above, which flagged this as the natural next
+step rather than adding Grafana twice.
+
+Two sibling projects (this one, and
+[dagster-prometheus-exporter](https://github.com/HirofumiTsuda/dagster-prometheus-exporter))
+had never been demonstrated working together before, despite being a natural pair.
+`dev/otel-collector-config.yaml` now has two independent pipelines, not one:
+
+- **Traces** (unchanged from the Tempo verification above): `otlp` receiver ->
+  `otlp/tempo` exporter.
+- **Metrics** (new): a `prometheus` receiver scrapes
+  `dagster-prometheus-exporter`'s `/metrics` (same thing a standalone Prometheus
+  server would do), then a `prometheusremotewrite` exporter forwards to the
+  Prometheus this demo also runs.
+
+Tempo has no metrics ingestion (traces-only, see above), so this isn't literally
+"one Collector, one backend" the way #56's original SigNoz-shaped diagram pictured
+-- the Collector is still the thing both signal types pass through, which is the
+part that actually matters here, and Grafana (new in this stack, with both a
+Prometheus and a Tempo datasource provisioned) is where a human actually looks at
+both together.
+
+New pieces:
+
+- `dev/jaffle-shop-dev.Dockerfile` -- runs `examples/dagster_workspace` (the
+  jaffle_shop pipeline verified against Jaeger and Tempo above) as a persistent
+  `dagster dev` webserver, not the one-shot `dagster asset materialize`
+  `examples/README.md`'s basic walkthrough uses. Needed because
+  `dagster-prometheus-exporter` scrapes a live GraphQL endpoint, which a one-shot
+  command never exposes. Needed a new `demo` dependency group
+  (`dagster-webserver`, pinned to the same 1.13.22 `dagster` itself resolves to)
+  -- this library itself never needs a running webserver, so it stayed out of the
+  base dependencies, same reasoning as the existing `dbt` group.
+- `exporter` service: the sibling project's own published image
+  (`ghcr.io/hirofumitsuda/dagster-prometheus-exporter:latest`), pointed at the
+  jaffle-shop container's GraphQL endpoint. Zero changes needed to that project,
+  exactly as #56 anticipated -- it's referenced as an external image, not vendored
+  or built from source here.
+- `prometheus`/`grafana` services, mirroring `dagster-prometheus-exporter`'s own
+  dev-stack conventions (same author, same shape) rather than inventing a
+  different one.
+
+Verified against a real materialization, not just each piece in isolation:
+launched a real run via GraphQL against the jaffle-shop webserver, and confirmed
+both signal types landed from that one run --
+
+```
+$ curl -s --get http://localhost:3200/api/search --data-urlencode 'q={}' | ...
+"jaffle_shop_combined_demo": {"spanCount": 16}   # same step->asset->check shape as before
+
+$ curl -s http://localhost:9090/api/v1/query?query=dagster_last_run_info | ...
+{"status": "success"}   # the exporter's own metric, having passed through the Collector's
+                         # prometheus receiver -> prometheusremotewrite -> this Prometheus
+```
+
+Both datasources confirmed provisioned and reachable via Grafana's own API
+(`GET /api/datasources`), not just assumed from the YAML.
+
+`dev/grafana/dashboards/combined-demo-dashboard.json` (auto-provisioned into a
+"dagster-otel" folder) ships three Prometheus-backed panels (active runs, latest
+run status, last run duration) and one native Grafana **traces** panel querying
+Tempo directly via TraceQL (`{resource.service.name="jaffle_shop_combined_demo"}`)
+-- not a link out to Tempo's own UI (it has none), an actual in-dashboard trace
+list. Built and validated against a real running Grafana instance via its HTTP API
+(`POST /api/dashboards/db`, then queried each panel's data via `POST
+/api/ds/query` to confirm real values came back) before writing the file, rather
+than hand-authoring dashboard JSON and hoping the schema was right.
+
+The datasource `uid`s are pinned explicitly in `dev/grafana/provisioning/
+datasources/datasource.yml` (`prometheus` for Prometheus,
+`tempo` for Tempo) specifically because the dashboard JSON references
+them by uid -- leaving Grafana to auto-generate one per fresh install would silently
+break the dashboard's datasource links every time the stack is torn down and
+recreated. Verified by actually doing that: removed the running Grafana container
+and recreated it from a clean state, confirmed both the pinned uids and the
+dashboard (still resolving real trace data) came back identically.
+
+One real debugging catch worth noting: a manual span sent straight from the host to
+the Tempo/Collector path (via the host-mapped port) landed and searched
+immediately, but the *first* check of the real materialization's trace (queried
+right after the run finished) came back empty -- re-querying moments later found it
+with the full 16 spans. Tempo's search index has some lag after ingestion; don't
+treat an immediate empty search as "it didn't arrive."
+
+### Confirmed limitation: Tempo's live-store ring can self-evict during idle periods (2026-09-20)
+
+Left the stack running (idle, no new traces) for roughly 35 minutes after the
+verification above and came back to `{}`-filtered search returning zero traces --
+including the one already confirmed present. Tempo's own logs explained why:
+
+```
+level=warn caller=basic_lifecycler_delegates.go:147 msg="auto-forgetting instance
+from the ring because it is unhealthy for a long time" instance=<container-id>
+last_heartbeat="..." forget_period=2m0s
+```
+
+Tempo 3.x's "live-store" ingestion path (the `ring=live-store`/`livestore-partitions`
+log lines flagged as unfamiliar in the Tempo-verification section above) tracks
+ring membership even for a single, monolithic instance -- and this instance's own
+heartbeat lapsed for long enough (evidence points to host resource contention from
+other work happening in parallel, not a fixed/reproducible interval) that Tempo's
+own health-check machinery evicted it from its own ring. Confirmed this is not a
+`:latest`-vs-pinned-version issue: pinning to `3.0.0` (the version the upstream
+single-binary example itself defaults to) shows the identical ring/live-store log
+lines and the identical behavior.
+
+Separately (and initially conflated with the above before checking): recreating the
+`tempo` container alone, without restarting `otel-collector`, breaks the
+collector's already-established gRPC connection to Tempo's old container IP --
+ordinary container-lifecycle behavior, not Tempo-specific, but worth remembering
+when iterating on this stack (`docker compose restart otel-collector` after
+recreating `tempo`).
+
+No fix attempted for the ring self-eviction itself -- root-causing Tempo 3.x's
+live-store health-check tuning is a deeper rabbit hole than this demo needs. If
+Grafana's dashboard shows no trace data, re-materializing the pipeline is the
+practical workaround (confirmed: a fresh run after the eviction landed and
+searched normally). Worth revisiting if this turns out to bite real usage rather
+than just an idle demo stack.
+
+### Three more gotchas, found walking a real user through actually viewing this (2026-09-20)
+
+The first two are genuinely Grafana/Tempo-side (confirmed by directly querying
+Tempo's own API in parallel with what the browser was doing, matching real request
+logs at the exact timestamps). **The third turned out not to be** -- see below --
+and is the one that actually explained the dashboard's traces panel showing "No
+data found in response" the whole time, not the two Grafana-side items, which were
+real but insufficient on their own to fix it.
+
+- **Grafana's anonymous auth is Viewer-only in this version**, regardless of
+  `GF_AUTH_ANONYMOUS_ORG_ROLE` -- confirmed via Grafana's own startup log:
+  `"auth.anonymous.org_role is deprecated, only viewer role is supported"`. Combined
+  with `GF_AUTH_DISABLE_LOGIN_FORM=true` (no way to log in as anything else), this
+  left no path to Editor/Admin capabilities at all. Fixed by keeping the login form
+  enabled with a fixed `admin`/`admin` account instead of relying on anonymous
+  access alone. Also had `GF_FEATURE_TOGGLES_ENABLE=<names>` (plural, space-separated)
+  silently do nothing -- Grafana logs it as deprecated too; one
+  `GF_FEATURE_TOGGLES_<NAME>=true` var per toggle is what this version actually
+  reads.
+- **Tempo's tag-*values* index (what populates the Search tab's "Service Name"
+  dropdown) is empty for data this fresh**, even though the same data is fully
+  findable by a direct query -- confirmed: `GET /api/v2/search/tag/resource.service.
+  name/values` returned `{"tagValues": []}` at the same moment `GET /api/search?q=
+  {resource.service.name="..."}`  returned the real trace. Whatever populates that
+  values index appears to lag behind (or depend on a compacted-block state the
+  live-store fast path doesn't need) separately from search itself being
+  immediately consistent. Practical takeaway: use the **TraceQL** tab (free-text
+  query, confirmed working) rather than the **Search** tab's dropdown-driven
+  filters for anything recently ingested.
+- **Not actually a Tempo/Grafana issue: this project's own root spans carry a fake,
+  non-empty `parentSpanId`.** After fixing both items above, the dashboard's
+  **traces** panel (the visualization that needs to structurally resolve a real
+  root span, unlike Explore's flatter Table view, which worked throughout) still
+  showed no data. Traced to `_seed_run_root_context()` in `_propagation.py`: its
+  placeholder `span_id=0x1`, meant as "never a real span, only trace_id matters,"
+  gets exported as a literal `parentSpanId` on the resulting root span --
+  `AAAAAAAAAAE=` (base64) decodes to `0000000000000001`, and no span with that ID
+  exists anywhere in the trace. Tempo's own search summary reflects this
+  accurately: `"rootServiceName": "<root span not yet received>"` on every trace
+  this project has produced through this code path, not just this demo's. **Fixed
+  in [Issue #63](https://github.com/HirofumiTsuda/dagster-otel/issues/63)** --
+  `_DeterministicRunIdGenerator` (`_setup.py`), a custom OTel `IdGenerator`, gets
+  the deterministic `trace_id` without ever activating a parent context at all, so
+  the SDK's own `parent_span_id`-recording logic has nothing to attach to. Verified
+  after the fix landed: `rootServiceName` resolves correctly, and the dashboard's
+  traces panel renders the trace.
+- **Two more, purely browser/session-side, found confirming the fix above through
+  the actual dashboard UI (not just the API) with a real person watching:**
+  - Grafana's session token has a rotation mechanism that can end up needing a
+    fresh login to recover from -- confirmed via server logs at the exact moment
+    of a failed panel load: `error="[session.token.rotate] token needs to be
+    rotated"`, `POST /api/ds/query status=401`. Frontend shows this as "No data
+    found in response" (a data-shaped message for what's actually an auth
+    failure), so it's easy to misdiagnose as a query/backend problem. Logging out
+    and back in resolves it, but note Grafana's post-login redirect can land on
+    the home page, not back on the dashboard you were viewing -- re-navigate to it
+    explicitly rather than assuming a re-login alone fixes a panel that's no
+    longer even on screen.
+  - The query editor's **"Table view"** toggle is a per-viewer UI preference, not
+    part of the saved dashboard -- turning it on for the traces panel produces the
+    same "No data found in response", with nothing in the dashboard JSON
+    responsible for it (confirmed: fetched the live dashboard's JSON directly,
+    nothing table-view-related is stored on the panel or its targets). No fix
+    possible in the dashboard definition itself; noted in the traces panel's own
+    `description` field instead, the one thing that *is* persisted and visible to
+    whoever hits this next.
+
+### The actual fix: the traces panel was the wrong panel type all along (2026-09-20)
+
+The two session/toggle items above were both real and both reproduced, but neither
+one was the actual, reproducible cause -- they explained specific *instances* of "No
+data found in response," not why it kept recurring. Walking through it again with a
+fresh login and the toggle confirmed off, the panel still showed no data, with the
+browser's Network tab showing the `ds_type=tempo` request wasn't even being sent
+(only the three `ds_type=prometheus` requests for the other panels were). Root
+cause, found along the way:
+
+- **The `grafana` container's `dev/grafana/dashboards` bind mount had come up
+  empty.** `docker compose exec grafana ls /var/lib/grafana/dashboards/` showed
+  nothing, while the same path on the host had the real file -- Docker had bound an
+  empty directory at container-creation time (this directory was created after the
+  container's first `docker compose up`) and, on this Docker Desktop/WSL2 setup,
+  never picked up the host directory's contents afterward. `docker compose up -d
+  --force-recreate grafana` fixed it (confirmed: the file appeared inside the
+  container immediately after). Worth remembering for any bind-mounted directory
+  created after its container's first start, not just this one.
+- **Once the panel could actually load, "No data found in response" turned out to
+  be structurally correct, not a bug at all.** The dashboard's target is a TraceQL
+  **search** query (`{resource.service.name="..."}`, matching however many traces
+  fit the filter) -- confirmed by reading the panel's own `/api/ds/query` response
+  directly: its frame schema carries `"meta": {"preferredVisualisationType":
+  "table"}`. Tempo itself is saying this result is table-shaped. Grafana's native
+  **traces** panel renders a single trace's span tree (parent/child span
+  hierarchy) -- structurally incompatible with a multi-trace search result,
+  regardless of session state or UI toggles. **Fixed** by changing the panel's
+  `type` from `"traces"` to `"table"` in `combined-demo-dashboard.json` -- the
+  Trace ID column keeps its drill-down link (`internal.query` in the field config)
+  into the full waterfall view, so nothing is lost, it's just a click away instead
+  of inline. Verified against a real run's data (screenshots in
+  `examples/README.md`).
+
+This is also the reason the "Table view" toggle and session-rotation items above
+*looked* like they explained the problem: both are real, independent ways to get
+the exact same "No data found in response" message on any panel, so each one was a
+plausible-looking, and wrong, explanation for a problem that was actually
+structural. The lesson generalizes: prefer reading the actual API response over
+reasoning from the frontend's (often reused, generic) error message.
+
 ## Open questions
 
 None currently tracked -- multi-root/fan-in (#5), k8s_job_executor (#3), and

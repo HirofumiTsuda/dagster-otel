@@ -71,6 +71,67 @@ Find the trace with `serviceStats.jaffle_shop_example.spanCount: 16`, then
 `curl http://localhost:3200/api/traces/<traceID>` for the full span tree (same
 `step -> asset -> check` shape as the Jaeger case above, see `docs/design.md`).
 
+### Combined demo: traces + dagster-prometheus-exporter's metrics, in Grafana
+
+```mermaid
+flowchart LR
+    assets["jaffle_shop_dbt_assets<br/>(dagster dev, traced_dbt())"]
+    exporter["dagster-prometheus-exporter<br/>(/metrics)"]
+    collector["otel-collector"]
+    tempo[("Tempo")]
+    prometheus[("Prometheus")]
+    grafana["Grafana"]
+
+    assets -- "OTLP traces" --> collector
+    exporter -- "GraphQL query" --> assets
+    collector -- "scrapes :9101/metrics" --> exporter
+    collector -- "otlp/tempo exporter" --> tempo
+    collector -- "prometheusremotewrite" --> prometheus
+    tempo -- "Tempo datasource" --> grafana
+    prometheus -- "Prometheus datasource" --> grafana
+```
+
+Two independent pipelines share the same Collector: traces flow straight through
+(OTLP receiver -> `otlp/tempo` exporter), while metrics get pulled from the
+exporter's `/metrics` (the Collector's `prometheus` receiver scrapes it, same as a
+standalone Prometheus server would) and pushed onward via `prometheusremotewrite`
+-- see `dev/otel-collector-config.yaml` and `docs/design.md` for why metrics don't
+just flow through Prometheus's own scraping instead.
+
+`docker compose up -d` also starts `jaffle-shop` (this same pipeline, but as a
+persistent `dagster dev` webserver rather than a one-shot `dagster asset
+materialize`), `exporter` (dagster-prometheus-exporter, pointed at that webserver),
+`prometheus`, and `grafana` (Issue #56). Trigger a real run via GraphQL instead of
+the CLI, since that's what a live webserver is for:
+
+```sh
+curl -s -X POST http://localhost:3001/graphql -H 'Content-Type: application/json' -d '{
+  "query": "mutation($e: ExecutionParams!) { launchPipelineExecution(executionParams: $e) { __typename ... on LaunchRunSuccess { run { runId status } } ... on PythonError { message } } }",
+  "variables": {"e": {"selector": {"repositoryLocationName": "definitions.py", "repositoryName": "__repository__", "jobName": "__ASSET_JOB"}, "mode": "default"}}
+}'
+```
+
+Open Grafana at http://localhost:3002 (no login needed, anonymous admin) -- the
+Tempo datasource shows this run's trace exactly as above, and the Prometheus
+datasource shows `dagster_last_run_info{status="success"}` and every other metric
+`dagster-prometheus-exporter` produces, both sourced from this one run. The
+exporter's own `/metrics` is scraped by the Collector's `prometheus` receiver (not
+by Prometheus directly), then forwarded via `prometheusremotewrite` -- see
+`docs/design.md` for why, and for the "Tempo's search index lags ingestion by a few
+seconds" gotcha that also applies here.
+
+![The combined demo dashboard: run/metric panels from dagster-prometheus-exporter alongside a table of recent traces from this project](../docs/images/combined-demo-dashboard.png)
+*Metrics and traces from the same runs, side by side in one dashboard. The traces
+panel is a table (not Grafana's native traces panel) -- the underlying TraceQL
+**search** query matches multiple traces, which Tempo itself returns as
+table-shaped data (`preferredVisualisationType: "table"`); the native traces panel
+only renders a single trace's span tree. Click a Trace ID to drill into the full
+waterfall.*
+
+![Clicking a Trace ID from the table drills into the full waterfall view in Explore](../docs/images/tempo-trace-waterfall.png)
+*The same `step -> asset -> check` span tree as the Jaeger example above, this time
+via Tempo.*
+
 ### Log correlation
 
 `capturing_logger` in `definitions.py` needs to be explicitly selected via run

@@ -1054,6 +1054,88 @@ right after the run finished) came back empty -- re-querying moments later found
 with the full 16 spans. Tempo's search index has some lag after ingestion; don't
 treat an immediate empty search as "it didn't arrive."
 
+### Confirmed limitation: Tempo's live-store ring can self-evict during idle periods (2026-09-20)
+
+Left the stack running (idle, no new traces) for roughly 35 minutes after the
+verification above and came back to `{}`-filtered search returning zero traces --
+including the one already confirmed present. Tempo's own logs explained why:
+
+```
+level=warn caller=basic_lifecycler_delegates.go:147 msg="auto-forgetting instance
+from the ring because it is unhealthy for a long time" instance=<container-id>
+last_heartbeat="..." forget_period=2m0s
+```
+
+Tempo 3.x's "live-store" ingestion path (the `ring=live-store`/`livestore-partitions`
+log lines flagged as unfamiliar in the Tempo-verification section above) tracks
+ring membership even for a single, monolithic instance -- and this instance's own
+heartbeat lapsed for long enough (evidence points to host resource contention from
+other work happening in parallel, not a fixed/reproducible interval) that Tempo's
+own health-check machinery evicted it from its own ring. Confirmed this is not a
+`:latest`-vs-pinned-version issue: pinning to `3.0.0` (the version the upstream
+single-binary example itself defaults to) shows the identical ring/live-store log
+lines and the identical behavior.
+
+Separately (and initially conflated with the above before checking): recreating the
+`tempo` container alone, without restarting `otel-collector`, breaks the
+collector's already-established gRPC connection to Tempo's old container IP --
+ordinary container-lifecycle behavior, not Tempo-specific, but worth remembering
+when iterating on this stack (`docker compose restart otel-collector` after
+recreating `tempo`).
+
+No fix attempted for the ring self-eviction itself -- root-causing Tempo 3.x's
+live-store health-check tuning is a deeper rabbit hole than this demo needs. If
+Grafana's dashboard shows no trace data, re-materializing the pipeline is the
+practical workaround (confirmed: a fresh run after the eviction landed and
+searched normally). Worth revisiting if this turns out to bite real usage rather
+than just an idle demo stack.
+
+### Three more gotchas, found walking a real user through actually viewing this (2026-09-20)
+
+The first two are genuinely Grafana/Tempo-side (confirmed by directly querying
+Tempo's own API in parallel with what the browser was doing, matching real request
+logs at the exact timestamps). **The third turned out not to be** -- see below --
+and is the one that actually explained the dashboard's traces panel showing "No
+data found in response" the whole time, not the two Grafana-side items, which were
+real but insufficient on their own to fix it.
+
+- **Grafana's anonymous auth is Viewer-only in this version**, regardless of
+  `GF_AUTH_ANONYMOUS_ORG_ROLE` -- confirmed via Grafana's own startup log:
+  `"auth.anonymous.org_role is deprecated, only viewer role is supported"`. Combined
+  with `GF_AUTH_DISABLE_LOGIN_FORM=true` (no way to log in as anything else), this
+  left no path to Editor/Admin capabilities at all. Fixed by keeping the login form
+  enabled with a fixed `admin`/`admin` account instead of relying on anonymous
+  access alone. Also had `GF_FEATURE_TOGGLES_ENABLE=<names>` (plural, space-separated)
+  silently do nothing -- Grafana logs it as deprecated too; one
+  `GF_FEATURE_TOGGLES_<NAME>=true` var per toggle is what this version actually
+  reads.
+- **Tempo's tag-*values* index (what populates the Search tab's "Service Name"
+  dropdown) is empty for data this fresh**, even though the same data is fully
+  findable by a direct query -- confirmed: `GET /api/v2/search/tag/resource.service.
+  name/values` returned `{"tagValues": []}` at the same moment `GET /api/search?q=
+  {resource.service.name="..."}`  returned the real trace. Whatever populates that
+  values index appears to lag behind (or depend on a compacted-block state the
+  live-store fast path doesn't need) separately from search itself being
+  immediately consistent. Practical takeaway: use the **TraceQL** tab (free-text
+  query, confirmed working) rather than the **Search** tab's dropdown-driven
+  filters for anything recently ingested.
+- **Not actually a Tempo/Grafana issue: this project's own root spans carry a fake,
+  non-empty `parentSpanId`.** After fixing both items above, the dashboard's
+  **traces** panel (the visualization that needs to structurally resolve a real
+  root span, unlike Explore's flatter Table view, which worked throughout) still
+  showed no data. Traced to `_seed_run_root_context()` in `_propagation.py`: its
+  placeholder `span_id=0x1`, meant as "never a real span, only trace_id matters,"
+  gets exported as a literal `parentSpanId` on the resulting root span --
+  `AAAAAAAAAAE=` (base64) decodes to `0000000000000001`, and no span with that ID
+  exists anywhere in the trace. Tempo's own search summary reflects this
+  accurately: `"rootServiceName": "<root span not yet received>"` on every trace
+  this project has produced through this code path, not just this demo's. Filed as
+  [Issue #63](https://github.com/HirofumiTsuda/dagster-otel/issues/63) -- a real
+  fix needs a custom OTel `IdGenerator` to get a deterministic `trace_id` without
+  the SDK's parent-inheritance mechanism forcing a `parent_span_id` onto the
+  result, more design work than this debugging session should turn into an
+  ad-hoc patch.
+
 ## Open questions
 
 None currently tracked -- multi-root/fan-in (#5), k8s_job_executor (#3), and

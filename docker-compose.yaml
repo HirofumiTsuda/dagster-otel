@@ -12,7 +12,7 @@ services:
   # at the collector (4327/4328), not directly at tempo, to exercise the Collector
   # hop this project doesn't otherwise get tested against.
   tempo:
-    image: grafana/tempo:latest
+    image: grafana/tempo:3.0.0 # pinned, not :latest -- see docs/design.md for why
     command: ["-config.file=/etc/tempo.yaml"]
     volumes:
       - ./dev/tempo.yaml:/etc/tempo.yaml
@@ -76,9 +76,24 @@ services:
     ports:
       - "3002:3000" # http://localhost:3002 -- both Prometheus and Tempo datasources provisioned (Issue #56)
     environment:
+      # Anonymous access is view-only in this Grafana version -- confirmed via its own
+      # startup log: "auth.anonymous.org_role is deprecated, only viewer role is
+      # supported", regardless of what GF_AUTH_ANONYMOUS_ORG_ROLE is set to. Kept for
+      # convenience (open the dashboard with zero setup), but the login form stays
+      # enabled (not GF_AUTH_DISABLE_LOGIN_FORM=true) with a fixed admin password so
+      # there's still a way to get Editor/Admin capabilities (Explore's free-text
+      # query editor among them) when Viewer-only isn't enough.
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
-      - GF_AUTH_DISABLE_LOGIN_FORM=true
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      # traceqlEditor for the free-text TraceQL query tab (Explore and the traces
+      # panel), metricsSummary for the trace-derived-metrics summary view -- matches
+      # Grafana's own official Tempo single-binary example. GF_FEATURE_TOGGLES_ENABLE
+      # (plural, space-separated) is deprecated in this Grafana version; one
+      # GF_FEATURE_TOGGLES_<NAME>=true var per toggle is what actually takes effect.
+      - GF_FEATURE_TOGGLES_TRACEQLEDITOR=true
+      - GF_FEATURE_TOGGLES_METRICSSUMMARY=true
 
 volumes:
   tempo-data:

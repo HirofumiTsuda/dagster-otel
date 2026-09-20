@@ -55,7 +55,7 @@
     {
       "id": 4,
       "title": "jaffle_shop_dbt_assets traces",
-      "description": "The trace half of this same run -- set OTEL_SERVICE_NAME to match your own pipeline's service name if you're pointing this at something other than the jaffle_shop example. If this shows \"No data found in response\" with everything else looking right, check the query editor's \"Table view\" toggle is off -- it's a per-viewer UI preference, not saved in this dashboard, so it can be on without anything here having changed.",
+      "description": "The trace half of this same run -- set OTEL_SERVICE_NAME to match your own pipeline's service name if you're pointing this at something other than the jaffle_shop example. If this shows \"No data found in response\" with everything else looking right, the data itself is fine -- check (1) your Grafana session hasn't gone stale (re-login) and (2) the query editor's \"Table view\" toggle is off. Both are per-viewer/session state, not saved in this dashboard.",
       "type": "traces",
       "datasource": { "type": "tempo", "uid": "tempo" },
       "targets": [

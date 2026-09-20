@@ -168,8 +168,8 @@ something backend-specific.
 traces and [dagster-prometheus-exporter](https://github.com/HirofumiTsuda/dagster-prometheus-exporter)'s
 metrics, both flowing through the same real OTel Collector into Grafana
 (`http://localhost:3002`, both Prometheus and Tempo datasources provisioned, plus a
-pre-built "dagster-otel combined demo" dashboard with a live traces panel) -- see
-[examples/README.md](examples/README.md#against-grafana-tempo-instead-through-a-real-otel-collector)
+pre-built "dagster-otel combined demo" dashboard) -- see
+[examples/README.md](examples/README.md#combined-demo-traces--dagster-prometheus-exporters-metrics-in-grafana)
 for how to run the example pipeline against it. The exporter needs zero changes; it's
 referenced as an external published image, not vendored here. See
 [docs/design.md](docs/design.md) for the full verification writeup.

@@ -48,6 +48,13 @@ should see a `jaffle_shop_dbt_assets` span with one child span per dbt node
 nested underneath) -- confirmed real, accurate durations per node, not zero-width
 markers (see Issue #8 / `docs/design.md`).
 
+A separate `customers_row_count_check` span, alongside it -- a genuinely
+Dagster-native `@asset_check` (not a dbt test), plain `@traced()` (not
+`@traced_dbt()`), verifying `AssetCheckExecutionContext` support (Issue #72):
+its own `dagster.asset_check_keys` attribute (`customers:customers_row_count_check`),
+not `dagster.asset_keys` -- a different context shape from `@op`/`@asset`, see
+`docs/design.md` for the full writeup.
+
 ### Against Grafana Tempo instead (through a real OTel Collector)
 
 `docker compose up -d` also starts `tempo` and `otel-collector` (Issue #42) -- point

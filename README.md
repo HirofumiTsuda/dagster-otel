@@ -211,7 +211,8 @@ a public `logging.Filter` on `context.log`).
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how to set up your toolchain, run checks
 locally, and submit a pull request. Bug reports and feature requests go through
 [GitHub issues](https://github.com/HirofumiTsuda/dagster-otel/issues/new/choose); a
-security vulnerability goes to [SECURITY.md](SECURITY.md) instead.
+security vulnerability goes to [SECURITY.md](SECURITY.md) instead. See
+[CHANGELOG.md](CHANGELOG.md) for what changed in each release.
 
 ## License
 

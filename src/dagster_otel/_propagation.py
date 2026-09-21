@@ -71,7 +71,7 @@ Dagster's own execution order should prevent that for a real dependency) simply 
 be found -- this only looks at *direct* dependencies, not transitively past an
 untraced one. `_seed_run_root_context` remains the fallback for that case, same as for
 a genuine root: every step derives the same trace_id deterministically from
-`context.run_id`, so even a step that can't find any real parent still lands in the
+`context.run.run_id`, so even a step that can't find any real parent still lands in the
 *same trace* as the rest of the run.
 """
 
@@ -120,7 +120,7 @@ def _ancestor_runs(context: ExecutionContext) -> list[DagsterRun]:
     again to read `.tags`).
     """
     runs: list[DagsterRun] = []
-    run_id: str | None = context.run_id
+    run_id: str | None = context.run.run_id
     while run_id is not None:
         run = context.instance.get_run_by_id(run_id)
         if run is None:
@@ -185,7 +185,7 @@ def publish_trace_context(context: ExecutionContext) -> None:
     TraceContextTextMapPropagator().inject(carrier)
 
     tag_key = _TAG_PREFIX + _own_step_key(context)
-    context.instance.add_run_tags(context.run_id, {tag_key: json.dumps(carrier)})
+    context.instance.add_run_tags(context.run.run_id, {tag_key: json.dumps(carrier)})
 
 
 def _find_context_for_step_key(runs: Sequence[DagsterRun], step_key: str) -> dict[str, str] | None:
@@ -241,7 +241,7 @@ def find_external_trace_context(
     via `tags={EXTERNAL_TRACE_CONTEXT_TAG_KEY: json.dumps(carrier)}` at launch time),
     before any `@traced()` step runs. Confirmed against real Dagster + Jaeger that a
     tag set this way (via `execute_job(tags=...)` and CLI `--tags` alike) is visible
-    from `context.instance.get_run_by_id(context.run_id).tags` by the time any step
+    from `context.instance.get_run_by_id(context.run.run_id).tags` by the time any step
     starts -- the same read path every other propagation lookup here already uses.
 
     Walks the same ancestor-run chain as `_find_context_for_step_key` -- checked
@@ -334,4 +334,4 @@ def _seed_run_root_context(context: ExecutionContext) -> None:
     resolve a trace's root structurally (Grafana's native traces panel, backed by
     Tempo).
     """
-    _current_run_id.set(context.run_id)
+    _current_run_id.set(context.run.run_id)

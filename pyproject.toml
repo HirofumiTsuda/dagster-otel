@@ -73,6 +73,7 @@ demo = [
 
 [project.urls]
 Home = "https://github.com/HirofumiTsuda/dagster-otel"
+Changelog = "https://github.com/HirofumiTsuda/dagster-otel/blob/main/CHANGELOG.md"
 
 [tool.hatch.version]
 path = "src/dagster_otel/version.py"

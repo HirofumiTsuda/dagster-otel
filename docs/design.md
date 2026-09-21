@@ -1285,6 +1285,89 @@ type checker: a `@traced()`-decorated `verify_check` (checking a
 the `isinstance` branch actually fires for the right context type in
 practice, not just in principle.
 
+## `traced_sensor()`/`traced_schedule()`: tick evaluation tracing (Issue #38, 2026-09-21)
+
+Everything above traces a *run's* steps. None of it touches a `@sensor`/`@schedule`
+tick's own evaluation -- what decides whether a run happens at all, running outside
+any op/asset compute context, before any run_id exists. A slow, erroring, or
+non-obviously-skipping tick was invisible to the trace backend entirely; only whatever
+run it eventually launched (if any) showed up, with no link back to the tick that
+caused it.
+
+**Shape, confirmed via live introspection rather than assumed:**
+
+- A tick has no run_id and no `context.instance`-backed state this library's existing
+  propagation lookups (`_propagation.py`) key on at all -- `SensorEvaluationContext`
+  has no `run_id`, only `.sensor_name`/`.cursor`/`.instance`/`.log`/
+  `.last_completion_time` (checked via `dir()`). So a tick needs none of `traced()`'s
+  cross-process deterministic-trace_id-seeding machinery
+  (`_ancestor_runs`/`_seed_run_root_context`) -- unlike a step, a tick evaluation
+  happens in exactly one process/one function call, so each tick is simply a fresh,
+  ordinary root span.
+- `ScheduleEvaluationContext` has no public name accessor at all -- confirmed via
+  `dir(dagster.ScheduleEvaluationContext)` (no `schedule_name` in the public listing)
+  and by reading `schedule_definition.py` directly: only a private `_schedule_name`
+  `__slots__` entry, never exposed via a property. `traced_schedule()`'s
+  `dagster.schedule_name` attribute falls back to the span's own name (`span_name or
+  func.__name__`) instead -- matching Dagster's own default schedule naming (a
+  schedule's name defaults to its decorated function's name unless overridden via
+  `@schedule(name=...)`), so this agrees with the real schedule name for the common
+  case even though it can't be read from the context.
+- `context.scheduled_execution_time` is `@public` but **raises** `CheckError` rather
+  than returning `None` when the context was built without one (confirmed live via
+  `build_schedule_context()` with no argument) -- not just a test artifact, since
+  nothing about the type signature (`-> datetime`, not `datetime | None`) or a real
+  evaluation call site guarantees a caller always supplies one. `_schedule_attributes`
+  wraps the read in a narrow `try/except Exception` rather than importing
+  `CheckError` from its actual home (`dagster_shared.check.functions`, not reachable
+  from the public `dagster` namespace at all -- `hasattr(dagster, "check")` is
+  `False`).
+- Reuses the existing `EXTERNAL_TRACE_CONTEXT_TAG_KEY` mechanism (Issue #13, built for
+  an *external* caller to nest a run under its own trace) but originating from
+  *inside* Dagster this time: any `RunRequest` a tick returns/yields (bare, inside a
+  plain `list`/`tuple`, or inside `SensorResult.run_requests`) gets the tag injected
+  into its `tags` via `RunRequest._replace(tags=...)` (`RunRequest` is immutable,
+  NamedTuple-based -- confirmed live that `._replace()` works). The launched run's own
+  root step then finds this via the *already-existing*
+  `find_external_trace_context()` lookup, unmodified -- no changes needed on that side
+  at all.
+- Real bug caught by the unit tests before this ever ran against anything real:
+  `SkipReason` is *also* NamedTuple-based (a real `tuple`/`Sequence` under the hood,
+  single `skip_message` field) -- an `isinstance(value, Sequence)` check (the first
+  draft of the "is this a bare sequence of RunRequests" branch) silently shredded a
+  returned `SkipReason("...")` into a one-element `list`, corrupting the return value
+  Dagster itself would then receive. Fixed by checking `type(value) in (list, tuple)`
+  instead of `isinstance(value, Sequence)` -- matches only a genuine plain `list`/
+  `tuple`, not any other NamedTuple-shaped member of the return union (this also
+  avoids needing to enumerate `DagsterRunReaction` by name, which isn't even
+  importable from the public `dagster` namespace).
+- `SensorResult(run_requests=None, ...)` normalizes to `run_requests=[]` in real
+  Dagster (confirmed live) -- the `is None` branch in `_tag_tick_result` is currently
+  unreachable in practice, kept anyway since it matches the field's own declared
+  `Sequence[RunRequest] | None` type and costs nothing.
+
+A separate module (`_sensors.py`), not folded into `_tracing.py`: a tick function's
+signature/semantics (`SensorEvaluationContext`/`ScheduleEvaluationContext`, returns
+`RunRequest`/`SkipReason`/`SensorResult`/`None`/a plain dict, not an op's `Output`) are
+different enough from an op/asset compute function's that reusing `traced()`'s
+`ComputeFn`/propagation/`dagster.*`-attribute machinery wouldn't fit cleanly -- same
+"separate, explicitly-named decorator" reasoning `traced_dbt()` already uses.
+
+**Verified against a real `@sensor` + real `@schedule` + real Jaeger** (not just unit
+tests), via `SensorDefinition.evaluate_tick()`/`ScheduleDefinition.evaluate_tick()`
+(Dagster's own public tick-evaluation API) against a real `DagsterInstance.ephemeral()`,
+then actually launching the returned `RunRequest` via `execute_in_process(tags=...)`:
+
+- Both tick spans (`verify_sensor`, `verify_schedule`) came back as genuine trace
+  roots (empty `references`), each carrying its own `dagster.sensor_name` /
+  (`dagster.schedule_name` + `dagster.scheduled_execution_time`).
+- Querying Jaeger's `/api/traces/<traceID>` for each tick's own trace_id showed the
+  *launched run's* `verify_asset` step span present in the *same trace*, with a real
+  `CHILD_OF` reference back to the tick span -- confirming the
+  `EXTERNAL_TRACE_CONTEXT_TAG_KEY` injection→`find_external_trace_context()` lookup
+  round-trip actually works when the tag originates from `traced_sensor()`/
+  `traced_schedule()`, not just from Issue #13's original external-caller case.
+
 ## License
 
 MIT -- matches [dagster-prometheus-exporter](https://github.com/HirofumiTsuda/dagster-prometheus-exporter)

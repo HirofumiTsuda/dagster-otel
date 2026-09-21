@@ -17,9 +17,13 @@ whole run's trace under an external caller's (Issue #13) -- see its own docstrin
 `_propagation.py` for how to use it; most users won't need it.
 
 For `@dbt_assets`, see `dagster_otel.dbt.traced_dbt()` instead of plain `@traced()`.
+
+For `@sensor`/`@schedule` tick evaluation (not a step of any run -- see `_sensors.py`
+for why that needs its own decorators), use `traced_sensor()`/`traced_schedule()`.
 """
 
 from dagster_otel._propagation import EXTERNAL_TRACE_CONTEXT_TAG_KEY, publish_trace_context
+from dagster_otel._sensors import traced_schedule, traced_sensor
 from dagster_otel._setup import configure
 from dagster_otel._tracing import traced
 from dagster_otel.version import __version__
@@ -30,4 +34,6 @@ __all__ = [
     "configure",
     "publish_trace_context",
     "traced",
+    "traced_schedule",
+    "traced_sensor",
 ]

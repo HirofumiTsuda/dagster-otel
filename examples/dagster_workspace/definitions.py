@@ -19,6 +19,11 @@ real dbt-backed asset graph rather than a hand-written toy:
    seed/test), keyed by the real Dagster asset_key/check_name, nested under this
    step's own span -- no changes needed to the function body below versus the plain
    `@traced()` version.
+4. Plain `@traced()` (not `@traced_dbt()`) against a real, Dagster-native
+   `@asset_check` (Issue #72, `dagster_otel`; opentelemetry-instrumentation-dagster
+   Issue #16) -- a genuinely different context shape (`AssetCheckExecutionContext`)
+   from the `@op`/`@asset` case `@traced()` originally supported, checking `customers`
+   below.
 
 Run with (see examples/README.md for the full walkthrough):
     DAGSTER_HOME=... OTEL_SERVICE_NAME=jaffle_shop_example \
@@ -30,9 +35,18 @@ import logging
 import os
 from pathlib import Path
 
-from dagster import AssetExecutionContext, Definitions, logger
+from dagster import (
+    AssetCheckExecutionContext,
+    AssetCheckResult,
+    AssetExecutionContext,
+    AssetKey,
+    Definitions,
+    asset_check,
+    logger,
+)
 from dagster_dbt import DbtCliResource, DbtProject, dbt_assets
 
+from dagster_otel import traced
 from dagster_otel.dbt import traced_dbt
 
 jaffle_shop_project = DbtProject(project_dir=Path(__file__).parent.parent / "jaffle_shop")
@@ -43,6 +57,17 @@ jaffle_shop_project.prepare_if_dev()
 @traced_dbt()
 def jaffle_shop_dbt_assets(context: AssetExecutionContext, dbt: DbtCliResource):
     yield from dbt.cli(["build"], context=context).stream()
+
+
+# Plain @traced() (not @traced_dbt() -- this isn't a dbt node, a genuinely separate
+# Dagster-native asset check on top of the dbt-produced `customers` asset), verifying
+# AssetCheckExecutionContext support (Issue #72): a different context shape from the
+# @op/@asset case @traced() originally handled -- no context.job_name, no
+# context.selected_asset_keys, see docs/design.md for the full writeup.
+@asset_check(asset=AssetKey("customers"))
+@traced()
+def customers_row_count_check(context: AssetCheckExecutionContext) -> AssetCheckResult:
+    return AssetCheckResult(passed=True, metadata={"note": "dagster_otel example check"})
 
 
 dbt_resource = DbtCliResource(project_dir=jaffle_shop_project)
@@ -74,6 +99,7 @@ def capturing_logger(init_context):
 
 defs = Definitions(
     assets=[jaffle_shop_dbt_assets],
+    asset_checks=[customers_row_count_check],
     resources={"dbt": dbt_resource},
     loggers={"capturing_logger": capturing_logger},
 )

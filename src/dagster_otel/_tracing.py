@@ -211,7 +211,7 @@ def _traced_span(context: ExecutionContext, name: str) -> Generator[None, None, 
         # isn't guaranteed. Sorted for determinism (a set has no stable order of its
         # own); omitted entirely (not set to an empty string) when there's nothing to
         # report, same "don't invent a value" stance as the other lookups here.
-        span.set_attribute("dagster.run_id", context.run_id)
+        span.set_attribute("dagster.run_id", context.run.run_id)
         span.set_attribute("dagster.job_name", context.job_name)
         span.set_attribute("dagster.step_key", _own_step_key(context))
         span.set_attribute("dagster.retry_number", context.retry_number)

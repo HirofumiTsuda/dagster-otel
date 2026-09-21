@@ -1206,6 +1206,29 @@ now confirmed against real Dagster, not just reasoned through. See
 [#11](https://github.com/HirofumiTsuda/dagster-otel/issues/11) for what's still
 missing before a release, not this library's own behavior.
 
+## `AssetExecutionContext.run_id` deprecation (Issue #68, 2026-09-21)
+
+Found via [`opentelemetry-instrumentation-dagster`](https://github.com/HirofumiTsuda/opentelemetry-instrumentation-dagster)'s
+own test suite (a sibling project depending on this one, with no upper pin
+beyond `dagster >= 1.5`, so it resolved a newer `dagster` than this repo's
+own `uv.lock` -- 1.13.23, not 1.13.22) surfacing `DeprecationWarning`s on
+every `context.run_id` read reachable from an `AssetExecutionContext`.
+`OpExecutionContext.run_id` is unaffected -- only `AssetExecutionContext`'s
+own convenience properties (`run_id`, `dagster_run`, `run_config`,
+`run_tags`, `has_tag`) are individually `@deprecated`, confirmed by reading
+`asset_execution_context.py` directly, not guessed from the warning text
+alone.
+
+Fixed by switching every site (`_tracing.py`'s span attribute,
+`_propagation.py`'s three internal lookups) to `context.run.run_id` instead
+-- `.run` itself carries no deprecation on either context class, and (checked
+by downloading the `dagster==1.5.0` wheel directly rather than assuming)
+existed at that version too, so it's safe across this library's whole
+declared `dagster >= 1.5` floor, not just the versions currently pinned in
+`uv.lock`. Verified against real `dagster==1.13.23` (the exact version that
+originally surfaced the warning) with `-W error::DeprecationWarning` --
+materializes cleanly, no warning raised.
+
 ## License
 
 MIT -- matches [dagster-prometheus-exporter](https://github.com/HirofumiTsuda/dagster-prometheus-exporter)

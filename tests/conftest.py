@@ -2,7 +2,7 @@
 
 No real Dagster instance/run is used anywhere here -- these are lightweight stand-ins
 providing only the attributes dagster_otel actually touches (`op_handle.path`,
-`run_id`, `instance.get_run_by_id`/`add_run_tags`, `log`,
+`run.run_id`, `instance.get_run_by_id`/`add_run_tags`, `log`,
 `get_step_execution_context().step.step_inputs[*].dependency_keys`). See the
 verify-tracing skill for why that's a deliberate scope limit, not an oversight: these
 tests can prove the Python logic is internally consistent, not that Dagster still
@@ -111,8 +111,8 @@ def make_context(
     asset_keys: list[str] | None = None,
 ) -> ExecutionContext:
     """A fake op/asset execution context with just enough surface for dagster_otel:
-    op_handle.path, run_id, job_name, retry_number, instance, log_event (unused since
-    the run-tags switch, but harmless to keep), log (a real logging.Logger --
+    op_handle.path, run.run_id, job_name, retry_number, instance, log_event (unused
+    since the run-tags switch, but harmless to keep), log (a real logging.Logger --
     context.log is a genuine logging.Logger subclass in real Dagster too, see
     _logging.py's module docstring, so using a plain one here matches the real shape
     rather than faking it), get_step_execution_context().step.step_inputs[*].
@@ -147,7 +147,7 @@ def make_context(
     )
     return SimpleNamespace(  # type: ignore[return-value]
         op_handle=SimpleNamespace(path=op_path),
-        run_id=run_id,
+        run=SimpleNamespace(run_id=run_id),
         job_name=job_name,
         retry_number=retry_number,
         instance=instance,

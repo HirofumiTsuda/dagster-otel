@@ -111,22 +111,31 @@ def make_context(
     asset_keys: list[str] | None = None,
 ) -> ExecutionContext:
     """A fake op/asset execution context with just enough surface for dagster_otel:
-    op_handle.path, run.run_id, job_name, retry_number, instance, log_event (unused
-    since the run-tags switch, but harmless to keep), log (a real logging.Logger --
-    context.log is a genuine logging.Logger subclass in real Dagster too, see
-    _logging.py's module docstring, so using a plain one here matches the real shape
-    rather than faking it), get_step_execution_context().step.step_inputs[*].
-    dependency_keys / .step.key, and selected_asset_keys -- the same public
-    properties/methods (see _propagation.py's _upstream_step_keys/_own_step_key
-    docstrings, and _tracing.py's asset_keys attribute comment) real Dagster defines
-    identically on both OpExecutionContext and AssetExecutionContext, so this fake
-    doesn't need to model the two context shapes differently either.
+    op_handle.path, run.run_id, job_def.name, retry_number, instance, log_event
+    (unused since the run-tags switch, but harmless to keep), log (a real
+    logging.Logger -- context.log is a genuine logging.Logger subclass in real
+    Dagster too, see _logging.py's module docstring, so using a plain one here
+    matches the real shape rather than faking it), get_step_execution_context().
+    step.step_inputs[*].dependency_keys / .step.key, and selected_asset_keys -- the
+    same public properties/methods (see _propagation.py's _upstream_step_keys/
+    _own_step_key docstrings, and _tracing.py's asset_keys attribute comment) real
+    Dagster defines identically on both OpExecutionContext and AssetExecutionContext,
+    so this fake doesn't need to model the two context shapes differently either.
+
+    Doesn't model AssetCheckExecutionContext (Issue #72) -- that context type has a
+    genuinely different shape (`.job_def` but no `.job_name`, `.selected_asset_check_
+    keys` but no `.selected_asset_keys`) that `isinstance()`-checking code (_tracing.
+    py's asset_check_keys branch) can't be satisfied by a SimpleNamespace regardless
+    of which attributes it's given; that behavior is verified against a real Dagster
+    run in test_tracing.py's own asset_check test instead.
 
     :param deps: step_keys this step directly depends on, matching real Dagster's
         `StepInput.dependency_keys` -- e.g. `deps=["root_op"]` for a step whose only
         input comes from a step named `root_op`. Defaults to no dependencies (a root).
-    :param job_name: matches real Dagster's `context.job_name` -- only meaningful for
-        tests asserting on the `dagster.job_name` span attribute.
+    :param job_name: matches real Dagster's `context.job_def.name` (what this library
+        now reads uniformly across all three context types, not `.job_name` -- see
+        _tracing.py's comment) -- only meaningful for tests asserting on the
+        `dagster.job_name` span attribute.
     :param retry_number: matches real Dagster's `context.retry_number` (0 for the
         first attempt) -- only meaningful for tests asserting on the
         `dagster.retry_number` span attribute.
@@ -148,7 +157,7 @@ def make_context(
     return SimpleNamespace(  # type: ignore[return-value]
         op_handle=SimpleNamespace(path=op_path),
         run=SimpleNamespace(run_id=run_id),
-        job_name=job_name,
+        job_def=SimpleNamespace(name=job_name),
         retry_number=retry_number,
         instance=instance,
         log_event=lambda event: None,

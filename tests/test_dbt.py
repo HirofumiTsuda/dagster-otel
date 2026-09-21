@@ -20,21 +20,29 @@ from dagster import (
     Output,
 )
 
+from dagster_otel._types import AssetOrOpExecutionContext
 from dagster_otel.dbt import traced_dbt
 
 DbtEvent = Output | AssetCheckResult
 
 
-def _make_dbt_context(instance: FakeInstance, run_id: str, op_path: list[str]):
+def _make_dbt_context(
+    instance: FakeInstance, run_id: str, op_path: list[str]
+) -> AssetOrOpExecutionContext:
     """make_context() plus the one extra method traced_dbt() needs that plain
     @traced() doesn't: asset_key_for_output(), used to resolve an Output event's
     output_name to a real AssetKey. Real Dagster's own implementation does the same
     output_name -> AssetKey lookup via the op's AssetsDefinition; this fake just
     treats the output_name as the asset key directly, which is exactly jaffle_shop's
-    real mapping (confirmed against a real run -- see docs/design.md)."""
+    real mapping (confirmed against a real run -- see docs/design.md).
+
+    Narrower return type than plain make_context() -- traced_dbt() is bound to
+    AssetOrOpExecutionContext, not the full 3-way ExecutionContext (Issue #72:
+    AssetCheckExecutionContext has no asset_key_for_output at all, and dbt_assets/
+    op-based dbt.cli() usage never actually produces one anyway)."""
     context = make_context(instance, run_id, op_path)
-    context.asset_key_for_output = lambda output_name: AssetKey(output_name)  # type: ignore[method-assign]
-    return context
+    context.asset_key_for_output = lambda output_name: AssetKey(output_name)  # type: ignore[method-assign, union-attr]
+    return context  # type: ignore[return-value]
 
 
 def test_traced_dbt_creates_asset_and_nested_check_spans(spans) -> None:

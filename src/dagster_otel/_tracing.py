@@ -53,7 +53,7 @@ from contextlib import contextmanager
 from functools import wraps
 from typing import Any, Concatenate, ParamSpec, Protocol, TypeVar, overload
 
-from dagster import get_dagster_logger
+from dagster import AssetCheckExecutionContext, get_dagster_logger
 from opentelemetry import trace
 from opentelemetry.trace import Link
 
@@ -211,13 +211,32 @@ def _traced_span(context: ExecutionContext, name: str) -> Generator[None, None, 
         # isn't guaranteed. Sorted for determinism (a set has no stable order of its
         # own); omitted entirely (not set to an empty string) when there's nothing to
         # report, same "don't invent a value" stance as the other lookups here.
+        #
+        # job_name (Issue #72): AssetCheckExecutionContext has no `.job_name` at all
+        # (only `.job_def`) -- confirmed against real Dagster that `.job_def.name`
+        # gives the identical value `.job_name` does on the other two context types,
+        # so this reads uniformly from `.job_def.name` for all three instead of
+        # branching.
+        #
+        # asset_check_keys (Issue #72): AssetCheckExecutionContext has no
+        # `.selected_asset_keys` either -- it has `.selected_asset_check_keys`
+        # instead (a frozenset[AssetCheckKey], not AssetKey), which can't be unified
+        # onto the same `dagster.asset_keys` attribute the same way `.job_def.name`
+        # could be (different key type entirely, `asset_key:check_name` shaped via
+        # AssetCheckKey.to_user_string(), not just an asset key), so this is a real
+        # isinstance branch, not just a differently-named same-shaped property.
         span.set_attribute("dagster.run_id", context.run.run_id)
-        span.set_attribute("dagster.job_name", context.job_name)
+        span.set_attribute("dagster.job_name", context.job_def.name)
         span.set_attribute("dagster.step_key", _own_step_key(context))
         span.set_attribute("dagster.retry_number", context.retry_number)
-        asset_keys = sorted(k.to_user_string() for k in context.selected_asset_keys)
-        if asset_keys:
-            span.set_attribute("dagster.asset_keys", ",".join(asset_keys))
+        if isinstance(context, AssetCheckExecutionContext):
+            asset_check_keys = sorted(k.to_user_string() for k in context.selected_asset_check_keys)
+            if asset_check_keys:
+                span.set_attribute("dagster.asset_check_keys", ",".join(asset_check_keys))
+        else:
+            asset_keys = sorted(k.to_user_string() for k in context.selected_asset_keys)
+            if asset_keys:
+                span.set_attribute("dagster.asset_keys", ",".join(asset_keys))
 
         # Published unconditionally now, not just when this step turns out to have
         # no parent (the old subgraph-keyed design's behavior): every step publishes

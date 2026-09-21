@@ -74,11 +74,14 @@ from opentelemetry import trace
 from opentelemetry.trace import NonRecordingSpan, Span, Status, StatusCode
 
 from dagster_otel._tracing import traced
-from dagster_otel._types import ExecutionContext
+from dagster_otel._types import AssetOrOpExecutionContext
 
 _tracer = trace.get_tracer("dagster_otel.dbt")
 
-C = TypeVar("C", bound=ExecutionContext)
+# Narrower than _tracing.py's own C (bound=ExecutionContext) -- see
+# AssetOrOpExecutionContext's own docstring in _types.py for why
+# AssetCheckExecutionContext is deliberately excluded here (Issue #72).
+C = TypeVar("C", bound=AssetOrOpExecutionContext)
 P = ParamSpec("P")
 #: A dbt test result event that carries a pass/fail verdict -- AssetCheckResult
 #: (asset-mode) and AssetCheckEvaluation (op-mode) are the identical shape under

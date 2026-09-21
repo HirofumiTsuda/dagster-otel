@@ -1229,6 +1229,62 @@ declared `dagster >= 1.5` floor, not just the versions currently pinned in
 originally surfaced the warning) with `-W error::DeprecationWarning` --
 materializes cleanly, no warning raised.
 
+## `AssetCheckExecutionContext` support (Issue #72, 2026-09-21)
+
+Found while scoping auto-instrumentation support for `@asset_check` in the
+sibling project ([opentelemetry-instrumentation-dagster#16](https://github.com/HirofumiTsuda/opentelemetry-instrumentation-dagster/issues/16)):
+applying `@traced()` to a real `@asset_check` function crashed at runtime --
+`AttributeError: 'AssetCheckExecutionContext' object has no attribute
+'job_name'`. `ExecutionContext` (`_types.py`) only covered `OpExecutionContext
+| AssetExecutionContext`; `AssetCheckExecutionContext` is a genuinely
+different shape (checked `dagster/_core/execution/context/
+asset_check_execution_context.py` directly, not guessed from the crash
+alone): no `.job_name` (only `.job_def`), no `.op_handle` (not that this
+library still reads that one -- see below), no `.selected_asset_keys` (only
+`.selected_asset_check_keys`, a `frozenset[AssetCheckKey]`, a different key
+type entirely). Does have `.log`, `.run`, `.retry_number`, `.instance`, and
+`.get_step_execution_context()` -- same shape as the other two for those.
+
+Fixed:
+
+- `ExecutionContext` widened to all three. `dagster.job_name` now reads
+  uniformly from `context.job_def.name` across all three context types
+  instead of `context.job_name` -- confirmed against a real run that
+  `.job_def.name` gives the identical value `.job_name` already did for
+  `OpExecutionContext`, so this isn't a behavior change for existing
+  `@op`/`@asset` users, just a different (available-everywhere) path to the
+  same value.
+- `dagster.asset_keys` (existing attribute) vs. a new `dagster.asset_check_keys`
+  attribute: a real `isinstance(context, AssetCheckExecutionContext)` branch
+  in `_tracing.py`, not a unifiable property access -- `AssetCheckKey` isn't
+  an `AssetKey`, so there's no single attribute name both shapes could share
+  the way `job_def.name` could.
+- `_own_step_key`/`_upstream_step_keys` (`_propagation.py`) needed no changes
+  at all -- despite their own docstrings still discussing `.op_handle`
+  (historical, from Issue #45; `.op_handle` isn't actually read anywhere in
+  this codebase anymore), both already use `context.get_step_execution_
+  context().step.key`/`.step_inputs`, which is present and correct on
+  `AssetCheckExecutionContext` too (confirmed against a real run: step key
+  `"my_asset_my_check"`, matching Dagster's own step-naming for asset checks).
+- `dbt.py`'s `traced_dbt()` is bound to a new, narrower alias
+  (`AssetOrOpExecutionContext = OpExecutionContext | AssetExecutionContext`,
+  not the widened `ExecutionContext`) -- `context.asset_key_for_output(...)`
+  (needed to resolve a dbt-yielded `Output`'s real `AssetKey`) isn't on
+  `AssetCheckExecutionContext` at all, and `@dbt_assets`/op-based `dbt.cli()`
+  usage never actually produces one anyway (dbt_assets is multi_asset-shaped,
+  not asset_check-shaped) -- caught by mypy the moment `ExecutionContext`
+  widened, not by a runtime failure.
+
+Verified against a real `@asset_check` execution + real Jaeger, not just the
+type checker: a `@traced()`-decorated `verify_check` (checking a
+`@traced()`-decorated `verify_asset`) produced two spans, both with correct
+`dagster.job_name`/`dagster.run_id`/`dagster.retry_number`/`dagster.step_key`;
+`verify_asset`'s span carries `dagster.asset_keys = verify_asset`, and
+`verify_check`'s carries `dagster.asset_check_keys = verify_asset:verify_check`
+(via `AssetCheckKey.to_user_string()`) -- not `dagster.asset_keys`, confirming
+the `isinstance` branch actually fires for the right context type in
+practice, not just in principle.
+
 ## License
 
 MIT -- matches [dagster-prometheus-exporter](https://github.com/HirofumiTsuda/dagster-prometheus-exporter)

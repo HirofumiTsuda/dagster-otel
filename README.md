@@ -106,6 +106,33 @@ whole `dbt build` -- see the screenshot at the top of this README (the real
 jaffle_shop example: 16 spans, 1 step + 3 assets + 12 checks), each with the
 accurate duration dbt itself measured.
 
+For `@sensor`/`@schedule` tick evaluation -- what decides whether a run happens,
+before any run_id exists, so `@traced()` itself doesn't apply -- use
+`traced_sensor()`/`traced_schedule()`:
+
+```python
+from dagster_otel import traced_sensor, traced_schedule
+
+@sensor(job=my_job)
+@traced_sensor()
+def my_sensor(context: SensorEvaluationContext):
+    ...
+    return RunRequest(...)
+
+@schedule(cron_schedule="0 * * * *", job=my_job)
+@traced_schedule()
+def my_schedule(context: ScheduleEvaluationContext):
+    ...
+    return RunRequest(...)
+```
+
+Each tick gets its own span (a fresh root -- a tick has no run_id or upstream step
+to attach to, unlike `@traced()`). Any `RunRequest` the tick returns/yields gets
+tagged so the run it launches (if any) nests under that tick's span in the trace
+backend -- so "why did/didn't this run fire" is answerable from the trace directly.
+See [docs/design.md](docs/design.md) for the full design and real-Jaeger
+verification.
+
 `@traced()` doesn't belong on a `@graph_asset`'s own decorated function --
 that function is a definition-time *composition* of other ops (it wires up
 which `@op` depends on which, called once at definition time), not a

@@ -11,6 +11,13 @@ OpenTelemetry tracing for Dagster ops and assets -- with trace/span IDs correlat
 your own log lines -- without giving up ownership of your op/asset definitions to a
 third-party decorator, and without monkeypatching Dagster internals.
 
+Need zero-code tracing instead -- pipelines you don't own the source of, so no
+`@traced()` calls to add? See
+[opentelemetry-instrumentation-dagster](https://github.com/HirofumiTsuda/opentelemetry-instrumentation-dagster),
+a separate, explicitly-riskier monkeypatch-based companion package built for that one
+use case; this project's own core stays decorator-based (see
+[Why this exists](#why-this-exists) for why).
+
 **Status: early release, self-tested locally against real Dagster runs (`multiprocess`,
 `k8s_job_executor`, retry-from-failure) + a real trace backend.**
 

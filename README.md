@@ -18,9 +18,6 @@ third-party decorator, and without monkeypatching Dagster internals.
 > that one use case. This project's own core stays decorator-based; see
 > [Why this exists](#why-this-exists) for why.
 
-**Status: early release, self-tested locally against real Dagster runs (`multiprocess`,
-`k8s_job_executor`, retry-from-failure) + a real trace backend.**
-
 ![A Jaeger trace showing jaffle_shop_dbt_assets nested into per-model and per-test spans](docs/images/jaeger-trace-dbt.png)
 *A real trace from the included example -- `traced_dbt()` turns one opaque
 `@dbt_assets` step into a real `step → asset → check` tree.*
@@ -33,6 +30,7 @@ third-party decorator, and without monkeypatching Dagster internals.
 - [Compatibility](#compatibility)
 - [Why this exists](#why-this-exists)
 - [Contributing](#contributing)
+- [Roadmap](#roadmap)
 - [License](#license)
 
 ## Installation
@@ -247,6 +245,25 @@ locally, and submit a pull request. Bug reports and feature requests go through
 [GitHub issues](https://github.com/HirofumiTsuda/dagster-otel/issues/new/choose); a
 security vulnerability goes to [SECURITY.md](SECURITY.md) instead. See
 [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
+
+## Roadmap
+
+- [x] `@traced()` for `@op`/`@asset`, bare or parameterized, with automatic root
+      detection (no manual `publish_trace_context()` call needed)
+- [x] Cross-process propagation via Dagster run tags -- verified across
+      `multiprocess` and `k8s_job_executor`, and across retry-from-failure
+- [x] Log/trace correlation via a public `logging.Filter` on `context.log`
+- [x] `traced_dbt()` for per-dbt-node (model/seed/test) spans
+- [x] `traced_sensor()` / `traced_schedule()` for tick evaluation
+- [x] External trace context nesting (`EXTERNAL_TRACE_CONTEXT_TAG_KEY`)
+- [x] Deterministic multi-root trace_id, so independent roots in the same run
+      never land in separate traces
+- [x] Configurable OTLP transport (`grpc` / `http/protobuf`)
+- [x] Jaeger and Grafana Tempo verified end-to-end
+- [ ] SigNoz verification ([#43](https://github.com/HirofumiTsuda/dagster-otel/issues/43))
+- [ ] User-supplied callback for custom span attributes ([#39](https://github.com/HirofumiTsuda/dagster-otel/issues/39))
+- [ ] `dagster.partition_key` span attribute for partitioned assets ([#36](https://github.com/HirofumiTsuda/dagster-otel/issues/36))
+- [ ] Automated `k8s_job_executor` e2e CI job ([#34](https://github.com/HirofumiTsuda/dagster-otel/issues/34))
 
 ## License
 

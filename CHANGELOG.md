@@ -4,6 +4,13 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/).
 
+## [0.4.0](https://github.com/HirofumiTsuda/dagster-otel/releases/tag/v0.4.0) - 2026-09-22
+
+### Added
+
+- **`traced_sensor()` / `traced_schedule()`** (`dagster_otel`) -- wrap a `@sensor`/`@schedule` tick-evaluation function in an OTel span, each tick a fresh root span ([#38](https://github.com/HirofumiTsuda/dagster-otel/issues/38), [#75](https://github.com/HirofumiTsuda/dagster-otel/pull/75)). Any `RunRequest` the tick returns/yields gets `EXTERNAL_TRACE_CONTEXT_TAG_KEY` injected into its tags, nesting the run it launches under the tick's span. Sets `dagster.sensor_name`/`dagster.schedule_name` (and `dagster.scheduled_execution_time`, when available) on the span. Usable bare, like `@traced()`/`@traced_dbt()`.
+- **`AssetCheckExecutionContext` support** -- `@traced()` no longer crashes (`AttributeError: 'AssetCheckExecutionContext' object has no attribute 'job_name'`) when applied to a real `@asset_check` function ([#72](https://github.com/HirofumiTsuda/dagster-otel/issues/72), [#73](https://github.com/HirofumiTsuda/dagster-otel/pull/73), [#74](https://github.com/HirofumiTsuda/dagster-otel/pull/74)). Adds a `dagster.asset_check_keys` span attribute for asset checks (`AssetCheckKey` isn't an `AssetKey`, so it's kept separate from `dagster.asset_keys`). No behavior change for existing `@op`/`@asset` users.
+
 ## [0.3.2](https://github.com/HirofumiTsuda/dagster-otel/releases/tag/v0.3.2) - 2026-09-21
 
 ### Fixed

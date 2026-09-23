@@ -1368,6 +1368,89 @@ then actually launching the returned `RunRequest` via `execute_in_process(tags=.
   round-trip actually works when the tag originates from `traced_sensor()`/
   `traced_schedule()`, not just from Issue #13's original external-caller case.
 
+## Concurrent `add_run_tags()` calls can drop a step's published context (Issue #80, 2026-09-23)
+
+Found while manually reproducing `dev/kubernetes/`'s existing Issue #3 verification
+against a fresh `kind` cluster, in the course of scoping Issue #34 (wiring that
+verification into real CI) -- exactly the kind of regression that CI job exists to
+catch, caught by hand before any workflow YAML was even written. Reproduced twice in a
+row, both times identically broken:
+
+```
+root_a       NO PARENT   (correct -- genuine root)
+root_b       NO PARENT   (correct -- genuine root)
+child_a      CHILD_OF root_a   -- correct
+child_b      NO PARENT         -- wrong, should be CHILD_OF root_b
+merge_op     CHILD_OF root_a   -- wrong, missing FOLLOWS_FROM root_b entirely
+```
+
+**Root cause is inside Dagster's own storage layer, not this module's step-key
+matching.** Confirmed directly against Postgres: the `run_tags` index table (one row
+per tag, written via plain `INSERT`) had all five `dagster_otel/trace_context/*` rows,
+including `root_b`'s -- but the `runs.run_body` JSON blob (what `DagsterRun.tags`, and
+therefore every lookup in this module before this fix, actually reads) was missing
+`root_b`'s tag entirely.
+
+Traced to `SqlRunStorage.add_run_tags()` (`dagster/_core/storage/runs/sql_run_storage.py`,
+confirmed against 1.13.22): it reads the run's current `run_body`, merges the new
+tag(s) into the deserialized tags dict, then writes the *whole* new blob back -- no
+optimistic locking, no `SELECT ... FOR UPDATE`. Two step pods publishing under
+*different* tag keys but genuinely concurrently (confirmed: `root_a`'s and `root_b`'s
+pods logged `STEP_WORKER_STARTING` at the identical timestamp) each read the same
+pre-existing blob, and whichever `UPDATE` lands last simply overwrites it -- the other
+pod's tag is gone from the blob forever, even though its own `RunTagsTable` row (a
+separate, safely-additive `INSERT` in the same `add_run_tags` call) survives, orphaned.
+Reproduced deterministically in a unit test (`tests/test_propagation_real_instance.py`,
+a real `DagsterInstance.ephemeral()`, no `kind` cluster needed) by replaying that exact
+read-modify-write with two independently-read stale snapshots.
+
+Apparently rare enough under `multiprocess_executor` (same host, same-process
+scheduling quirks) to not have been caught before; reproduced on both `kind` runs
+under `k8s_job_executor` (genuinely separate pods, real network latency to Postgres).
+
+**Fix: `_read_run_tag()` (`_propagation.py`) reads the `run_tags` index table directly
+via `instance.run_storage.fetchall(...)` when the storage is `SqlRunStorage`-backed
+(Postgres and sqlite -- the two backends this project verifies against), instead of
+`run.tags`.** That table's writes are plain per-key `INSERT`s, unaffected by the blob
+race -- reading from it sidesteps the problem entirely without needing Dagster itself
+to add locking. Every lookup in this module (`find_upstream_trace_contexts`,
+`find_external_trace_context`, `find_previous_attempt_context`) now goes through this
+instead of reading `run.tags` directly. No existing Dagster public API does this
+per-run lookup already: `DagsterInstance.get_run_tags()` is a cross-run *distinct tag
+value* scan (`SELECT DISTINCT key, value ... WHERE key IN (...)`, no `run_id` filter
+at all), built for "what values has this tag ever had," not "what's this tag's value
+for *this* run" -- not usable as a drop-in replacement.
+
+Takes the already-fetched `DagsterRun` (not just its `run_id`) so the non-SQL fallback
+path (some other, non-SQL `RunStorage` implementation -- falls back to the exact same
+racy `run.tags` read as before, not fixed for that case) doesn't reintroduce Issue
+#35's per-lookup refetch problem: `_ancestor_runs`'s whole point is fetching the run
+chain once and sharing it, and a naive `instance.get_run_by_id(run_id)` inside the new
+fallback would have silently defeated that.
+
+Not defended with a `try/except` around the new private imports
+(`dagster._core.storage.runs.schema.RunTagsTable`, `...sql_run_storage.SqlRunStorage`)
+-- consistent with this module's existing policy on internal-API dependence (see
+`_own_step_key`'s docstring): a future Dagster refactor breaking this should fail
+loudly at import time, not silently regress back to the racy blob-only path unnoticed.
+
+**Verified twice, not just via the new unit test**: rebuilt the `dev/kubernetes/` image
+with the fix and re-ran the exact same `kind` cluster reproduction. Trace shape came
+back fully correct:
+
+```
+root_a       NO PARENT
+root_b       NO PARENT
+child_a      CHILD_OF root_a
+child_b      CHILD_OF root_b
+merge_op     CHILD_OF root_a, FOLLOWS_FROM root_b
+```
+
+Issue #34 (the k8s e2e CI job) was deliberately left un-started until this landed --
+writing strict trace-shape assertions against the previously-broken shape would have
+meant either encoding the bug as "expected" or shipping a CI job that fails
+immediately, neither of which was the goal at the time.
+
 ## License
 
 MIT -- matches [dagster-prometheus-exporter](https://github.com/HirofumiTsuda/dagster-prometheus-exporter)

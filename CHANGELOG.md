@@ -4,6 +4,12 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Concurrent steps publishing trace context under `k8s_job_executor` could silently lose one side's context, breaking multi-root/fan-in trace shape ([#80](https://github.com/HirofumiTsuda/dagster-otel/issues/80)). Root cause was a lost-update race in Dagster's own `SqlRunStorage.add_run_tags()` (a read-modify-write on the run's serialized tags blob, no locking) -- worked around by reading a step's published context from the `run_tags` index table directly (safe, per-key inserts) instead of `DagsterRun.tags`, for `SqlRunStorage`-backed instances (Postgres and sqlite). Verified against a real `kind` cluster, not just a unit test.
+
 ## [0.4.0](https://github.com/HirofumiTsuda/dagster-otel/releases/tag/v0.4.0) - 2026-09-22
 
 ### Added

@@ -78,10 +78,13 @@ a genuine root: every step derives the same trace_id deterministically from
 import json
 from collections.abc import Sequence
 
-from dagster import DagsterRun
+from dagster import DagsterInstance, DagsterRun
+from dagster._core.storage.runs.schema import RunTagsTable
+from dagster._core.storage.runs.sql_run_storage import SqlRunStorage
 from opentelemetry import context as otel_context
 from opentelemetry import trace
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+from sqlalchemy import select
 
 from dagster_otel._setup import _current_run_id
 from dagster_otel._types import ExecutionContext
@@ -188,12 +191,62 @@ def publish_trace_context(context: ExecutionContext) -> None:
     context.instance.add_run_tags(context.run.run_id, {tag_key: json.dumps(carrier)})
 
 
-def _find_context_for_step_key(runs: Sequence[DagsterRun], step_key: str) -> dict[str, str] | None:
+def _read_run_tag(instance: DagsterInstance, run: DagsterRun, key: str) -> str | None:
+    """A single tag's current value for a specific run -- read straight from the
+    `run_tags` index table when the storage backend supports it (Issue #80), rather
+    than `run.tags` (a `DagsterRun` already fetched by the caller, e.g. via
+    `_ancestor_runs`), which is unsafe to read here.
+
+    Takes the already-fetched `run`, not just its `run_id`, so the non-SQL fallback
+    below doesn't re-fetch it -- `_ancestor_runs`'s whole point (Issue #35) is that
+    callers share one fetch of the run chain across every lookup in a step; a
+    per-tag-check re-fetch here would silently reintroduce exactly what that fixed.
+
+    `DagsterInstance.add_run_tags()` (`SqlRunStorage`, confirmed against dagster-otel
+    1.13.22's implementation) does a read-modify-write on the *run's own serialized
+    snapshot* (the `runs.run_body` column `DagsterRun.tags` is deserialized from) with
+    no optimistic locking: it reads the run, merges the new tag(s) into its in-memory
+    tags dict, then writes the whole snapshot back. Two steps publishing under
+    *different* tag keys but genuinely concurrently -- confirmed reproducible under
+    `k8s_job_executor`, where each step is a separate pod with real network latency to
+    Postgres, not just a separate same-host process -- can each read the same
+    pre-existing snapshot, and whichever writes back last silently clobbers the
+    other's tag out of it entirely. The separate `run_tags` table row for the lost tag
+    survives untouched (that part of `add_run_tags` is a plain per-key `INSERT`, safe
+    under concurrent writers) -- it's just never read from again by anything that
+    goes through `DagsterRun.tags`, which is every other lookup in this module before
+    this function existed. See Issue #80 for the full reproduction (a real `kind`
+    cluster, not mocked) and the Postgres-level evidence.
+
+    Only actually bypasses the race for `SqlRunStorage`-backed instances (Postgres and
+    sqlite, the two backends this project verifies against -- see README's
+    Compatibility section) -- some other, non-SQL `RunStorage` implementation falls
+    back to the same `DagsterRun.tags` read every lookup here used before this fix,
+    same race and all. Not defended with a try/except around the private imports
+    above (`RunTagsTable`/`SqlRunStorage`) -- consistent with this module's existing
+    policy on internal-API dependence (see `_own_step_key`'s docstring): a future
+    Dagster refactor breaking this should fail loudly, not silently regress back to
+    the racy path unnoticed.
+    """
+    storage = instance.run_storage
+    if not isinstance(storage, SqlRunStorage):
+        return run.tags.get(key)
+    rows = storage.fetchall(
+        select(RunTagsTable.c.value)
+        .where(RunTagsTable.c.run_id == run.run_id)
+        .where(RunTagsTable.c.key == key)
+    )
+    return rows[0]["value"] if rows else None
+
+
+def _find_context_for_step_key(
+    instance: DagsterInstance, runs: Sequence[DagsterRun], step_key: str
+) -> dict[str, str] | None:
     """The trace context a specific step published, if any -- searching the given
     runs (see _ancestor_runs) in order."""
     tag_key = _TAG_PREFIX + step_key
     for run in runs:
-        tag_value = run.tags.get(tag_key)
+        tag_value = _read_run_tag(instance, run, tag_key)
         if tag_value is not None:
             result: dict[str, str] = json.loads(tag_value)
             return result
@@ -224,7 +277,7 @@ def find_upstream_trace_contexts(
     return [
         carrier
         for key in sorted(_upstream_step_keys(context))
-        if (carrier := _find_context_for_step_key(runs, key)) is not None
+        if (carrier := _find_context_for_step_key(context.instance, runs, key)) is not None
     ]
 
 
@@ -241,8 +294,8 @@ def find_external_trace_context(
     via `tags={EXTERNAL_TRACE_CONTEXT_TAG_KEY: json.dumps(carrier)}` at launch time),
     before any `@traced()` step runs. Confirmed against real Dagster + Jaeger that a
     tag set this way (via `execute_job(tags=...)` and CLI `--tags` alike) is visible
-    from `context.instance.get_run_by_id(context.run.run_id).tags` by the time any step
-    starts -- the same read path every other propagation lookup here already uses.
+    via `_read_run_tag` by the time any step starts -- same safe read path every other
+    propagation lookup here uses (Issue #80).
 
     Walks the same ancestor-run chain as `_find_context_for_step_key` -- checked
     directly against a real retry-from-failure run (2026-09-15) that Dagster does
@@ -260,7 +313,7 @@ def find_external_trace_context(
     if runs is None:
         runs = _ancestor_runs(context)
     for run in runs:
-        tag_value = run.tags.get(EXTERNAL_TRACE_CONTEXT_TAG_KEY)
+        tag_value = _read_run_tag(context.instance, run, EXTERNAL_TRACE_CONTEXT_TAG_KEY)
         if tag_value is not None:
             result: dict[str, str] = json.loads(tag_value)
             return result
@@ -297,7 +350,7 @@ def find_previous_attempt_context(
         return None
     if runs is None:
         runs = _ancestor_runs(context)
-    return _find_context_for_step_key(runs, _own_step_key(context))
+    return _find_context_for_step_key(context.instance, runs, _own_step_key(context))
 
 
 def _activate_trace_context(carrier: dict[str, str]) -> None:

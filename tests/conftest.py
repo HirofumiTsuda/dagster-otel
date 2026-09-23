@@ -84,6 +84,13 @@ class FakeInstance:
 
     def __init__(self) -> None:
         self._runs: dict[str, dict[str, Any]] = {}
+        #: Not a real DagsterInstance.run_storage -- just needs to fail the
+        #: `isinstance(storage, SqlRunStorage)` check in _propagation.py's
+        #: _read_run_tag, so these tests exercise the same get_run_by_id(...).tags
+        #: fallback path they always have. The SqlRunStorage-backed fast path (the
+        #: actual Issue #80 fix) needs a real DagsterInstance to mean anything -- see
+        #: test_propagation_real_instance.py.
+        self.run_storage = object()
 
     def create_run(self, run_id: str, parent_run_id: str | None = None) -> None:
         self._runs[run_id] = {"parent_run_id": parent_run_id, "tags": {}}

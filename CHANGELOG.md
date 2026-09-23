@@ -6,6 +6,10 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Automated `k8s_job_executor` e2e CI job (`.github/workflows/k8s-e2e.yml`, [#34](https://github.com/HirofumiTsuda/dagster-otel/issues/34)) -- a real `kind` cluster running the multi-root/fan-in job from `dev/kubernetes/`, asserting the actual trace shape in a real Jaeger via its HTTP API. Scheduled + `workflow_dispatch`, not per-PR, matching `dagster-prometheus-exporter`'s own `helm-e2e.yml` tradeoff. This is the job that would have caught #80 automatically going forward.
+
 ### Fixed
 
 - Concurrent steps publishing trace context under `k8s_job_executor` could silently lose one side's context, breaking multi-root/fan-in trace shape ([#80](https://github.com/HirofumiTsuda/dagster-otel/issues/80), [#81](https://github.com/HirofumiTsuda/dagster-otel/pull/81)). Root cause was a lost-update race in Dagster's own `SqlRunStorage.add_run_tags()` (a read-modify-write on the run's serialized tags blob, no locking) -- worked around by reading a step's published context from the `run_tags` index table directly (safe, per-key inserts) instead of `DagsterRun.tags`, for `SqlRunStorage`-backed instances (Postgres and sqlite). Verified against a real `kind` cluster, not just a unit test.

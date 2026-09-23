@@ -263,7 +263,7 @@ security vulnerability goes to [SECURITY.md](SECURITY.md) instead. See
 - [ ] SigNoz verification ([#43](https://github.com/HirofumiTsuda/dagster-otel/issues/43))
 - [ ] User-supplied callback for custom span attributes ([#39](https://github.com/HirofumiTsuda/dagster-otel/issues/39))
 - [ ] `dagster.partition_key` span attribute for partitioned assets ([#36](https://github.com/HirofumiTsuda/dagster-otel/issues/36))
-- [ ] Automated `k8s_job_executor` e2e CI job ([#34](https://github.com/HirofumiTsuda/dagster-otel/issues/34))
+- [x] Automated `k8s_job_executor` e2e CI job ([#34](https://github.com/HirofumiTsuda/dagster-otel/issues/34)) -- scheduled + on-demand, not per-PR (see the workflow's own comment for why)
 
 ## License
 

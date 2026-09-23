@@ -1,0 +1,156 @@
+name: k8s_job_executor e2e (kind)
+
+# Complements ci.yml's unit tests (which mock context.instance entirely -- see
+# tests/conftest.py's own docstring on why that's a deliberate scope limit): this
+# actually runs a real multi-root/fan-in Dagster job through k8s_job_executor, on a
+# real kind cluster, and asserts the real trace shape that lands in a real Jaeger --
+# the one thing this library exists to get right (cross-pod trace propagation) that
+# had zero regression coverage before this job (see Issue #34). Directly responsible
+# for catching Issue #80 (a lost-update race in Dagster's own storage layer) by hand,
+# before this workflow even existed.
+#
+# Deliberately not a pull_request/push trigger: a full kind cluster spin-up is heavy
+# for every PR and more prone to transient flakiness than ci.yml's unit-test-level
+# checks -- same tradeoff dagster-prometheus-exporter's own helm-e2e.yml already
+# makes. Scheduled + on-demand instead: catches real regressions (a
+# dagster/dagster-k8s/dagster-postgres bump, or a change to _propagation.py's
+# root/parent-selection logic) over time without slowing down or blocking every PR.
+
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: dagster-otel-e2e
+
+      - name: Build and load the k8s e2e image
+        run: |
+          docker build -f dev/kubernetes/Dockerfile -t dagster-otel-k8s-e2e:latest .
+          kind load docker-image dagster-otel-k8s-e2e:latest --name dagster-otel-e2e
+
+      - name: Deploy postgres + jaeger
+        run: |
+          kubectl apply -f dev/kubernetes/manifests.yaml
+          kubectl wait --for=condition=available deployment/postgres deployment/jaeger --timeout=120s
+
+      - name: Run the multi-root/fan-in job under k8s_job_executor
+        run: |
+          kubectl apply -f dev/kubernetes/runner-pod.yaml
+          kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/dagster-runner --timeout=120s
+
+      - name: Assert every step ran as its own separate pod, not just a separate process
+        run: |
+          # 5 steps (root_a, root_b, child_a, child_b, merge_op) -- see
+          # dev/kubernetes/workspace/k8s_e2e_job.py. Each must be its own
+          # "dagster-step-*" pod, all Completed -- proves k8s_job_executor actually
+          # launched separate pods, not just separate processes on the runner pod.
+          kubectl get pods -o wide
+          STEP_PODS=$(kubectl get pods -o json | python3 -c "
+          import json, sys
+          pods = json.load(sys.stdin)['items']
+          steps = [p for p in pods if p['metadata']['name'].startswith('dagster-step-')]
+          print(len(steps))
+          for p in steps:
+              phase = p['status']['phase']
+              name = p['metadata']['name']
+              print(f'{name}: {phase}', file=sys.stderr)
+              if phase != 'Succeeded':
+                  sys.exit(f'::error::{name} did not reach Succeeded (phase={phase})')
+          ")
+          echo "step pods: $STEP_PODS"
+          [ "$STEP_PODS" -eq 5 ] || { echo "::error::expected exactly 5 dagster-step-* pods, got $STEP_PODS"; exit 1; }
+
+      - name: Assert the real trace shape in Jaeger
+        run: |
+          kubectl port-forward svc/jaeger 16686:16686 &
+          PORT_FORWARD_PID=$!
+          for i in $(seq 1 15); do
+            curl -sf http://localhost:16686 > /dev/null && break
+            sleep 1
+          done
+
+          # Verified shape (Issue #3, re-verified after the Issue #80 fix):
+          #   root_a/root_b: genuine roots, no parent at all (Issue #63 -- a real
+          #     span with no valid parent context never gets a parent_span_id,
+          #     regardless of sharing a deterministic trace_id with the rest of
+          #     the run).
+          #   child_a: CHILD_OF root_a.
+          #   child_b: CHILD_OF root_b.
+          #   merge_op: CHILD_OF root_a (deterministic primary parent --
+          #     "root_a" < "root_b"), FOLLOWS_FROM root_b (the fan-in Link).
+          # A real regression here (e.g. Issue #80's exact bug: child_b/merge_op
+          # silently losing their relationship to root_b) fails this job loudly
+          # instead of "no trace at all" -- that's the whole point.
+          python3 <<'PYEOF'
+          import json
+          import sys
+          import time
+          import urllib.request
+
+          expected = {
+              "root_a": frozenset(),
+              "root_b": frozenset(),
+              "child_a": frozenset({("CHILD_OF", "root_a")}),
+              "child_b": frozenset({("CHILD_OF", "root_b")}),
+              "merge_op": frozenset({("CHILD_OF", "root_a"), ("FOLLOWS_FROM", "root_b")}),
+          }
+
+          trace = None
+          for _ in range(30):
+              with urllib.request.urlopen(
+                  "http://localhost:16686/api/traces?service=k8s_e2e_test&limit=5"
+              ) as resp:
+                  data = json.load(resp)
+              if data["data"]:
+                  trace = data["data"][0]
+                  spans = {s["spanID"]: s for s in trace["spans"]}
+                  if {s["operationName"] for s in trace["spans"]} == set(expected):
+                      break
+              time.sleep(2)
+          else:
+              sys.exit(
+                  "::error::never saw all 5 expected spans in Jaeger "
+                  f"(last seen: {sorted(s['operationName'] for s in trace['spans']) if trace else 'no trace at all'})"
+              )
+
+          by_name = {s["operationName"]: s for s in trace["spans"]}
+          failures = []
+          for name, want in expected.items():
+              span = by_name[name]
+              got = frozenset(
+                  (ref["refType"], spans[ref["spanID"]]["operationName"])
+                  for ref in span.get("references", [])
+              )
+              if got != want:
+                  failures.append(f"{name}: expected {sorted(want)}, got {sorted(got)}")
+
+          if failures:
+              sys.exit("::error::trace shape mismatch:\n" + "\n".join(failures))
+
+          print("trace shape verified:")
+          for name in expected:
+              refs = by_name[name].get("references", [])
+              desc = ", ".join(f"{r['refType']}->{spans[r['spanID']]['operationName']}" for r in refs) or "no parent"
+              print(f"  {name}: {desc}")
+          PYEOF
+
+          kill "$PORT_FORWARD_PID" 2>/dev/null || true
+
+      - name: Dump pod state for debugging
+        if: failure()
+        run: |
+          kubectl get pods -o wide
+          echo "--- dagster-runner ---"
+          kubectl logs dagster-runner --tail=200 || true
+          for pod in $(kubectl get pods -o name | grep dagster-step); do
+            echo "--- $pod ---"
+            kubectl logs "$pod" --tail=100 || true
+          done

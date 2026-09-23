@@ -5,6 +5,7 @@
 [![Release](https://img.shields.io/github/v/release/HirofumiTsuda/dagster-otel)](https://github.com/HirofumiTsuda/dagster-otel/releases/latest)
 [![CI](https://github.com/HirofumiTsuda/dagster-otel/actions/workflows/ci.yml/badge.svg)](https://github.com/HirofumiTsuda/dagster-otel/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/HirofumiTsuda/dagster-otel/actions/workflows/codeql.yml/badge.svg)](https://github.com/HirofumiTsuda/dagster-otel/actions/workflows/codeql.yml)
+[![k8s e2e](https://github.com/HirofumiTsuda/dagster-otel/actions/workflows/k8s-e2e.yml/badge.svg)](https://github.com/HirofumiTsuda/dagster-otel/actions/workflows/k8s-e2e.yml)
 [![License: MIT](https://img.shields.io/github/license/HirofumiTsuda/dagster-otel)](LICENSE)
 
 OpenTelemetry tracing for Dagster ops and assets -- with trace/span IDs correlated into

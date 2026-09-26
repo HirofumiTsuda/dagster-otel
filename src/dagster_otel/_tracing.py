@@ -51,9 +51,14 @@ import inspect
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from functools import wraps
-from typing import Any, Concatenate, ParamSpec, Protocol, TypeVar, overload
+from typing import Any, ParamSpec, Protocol, TypeVar, overload
 
-from dagster import AssetCheckExecutionContext, get_dagster_logger
+from dagster import (
+    AssetCheckExecutionContext,
+    DagsterInvariantViolationError,
+    OpExecutionContext,
+    get_dagster_logger,
+)
 from opentelemetry import trace
 from opentelemetry.trace import Link
 
@@ -74,24 +79,20 @@ from dagster_otel._types import ExecutionContext
 
 _tracer = trace.get_tracer("dagster_otel")
 
-C = TypeVar("C", bound=ExecutionContext)
 P = ParamSpec("P")
 R = TypeVar("R")
 Y = TypeVar("Y")
 S = TypeVar("S")
 Rt = TypeVar("Rt")
 
-#: An op/asset compute function: first positional arg is the execution context,
-#: everything after that is whatever the wrapped function itself declares.
-#:
-#: The context parameter is generic (bound=ExecutionContext), not just
-#: ExecutionContext outright -- caught by pyright (not mypy) against a real example:
-#: real op/asset code is normally typed with the *specific* context type it expects
-#: (`AssetExecutionContext`, not the `OpExecutionContext | AssetExecutionContext`
-#: union), and a fixed-Union parameter type rejects a narrower one by function
-#: parameter contravariance. Generic C lets `traced()` accept and preserve whichever
-#: specific context type -- or the union -- the wrapped function actually declares.
-ComputeFn = Callable[Concatenate[C, P], R]
+#: The overloads below type the compute function as a plain `Callable[P, ...]`, not
+#: `Callable[Concatenate[Context, P], ...]`: since Issue #94 the context parameter is
+#: optional (see `_context_param()`), so requiring one in the signature would reject
+#: Dagster's own context-less form at type-check time just as the old wrapper did at
+#: run time. `P` still captures and preserves whatever the function declares,
+#: including a specific context type such as `AssetExecutionContext` -- the reason the
+#: old `ComputeFn` alias used a generic context parameter rather than the fixed
+#: `ExecutionContext` union (see docs/design.md).
 
 
 class _TracedDecorator(Protocol):
@@ -100,10 +101,10 @@ class _TracedDecorator(Protocol):
 
     @overload
     def __call__(
-        self, func: ComputeFn[C, P, Generator[Y, S, Rt]]
-    ) -> ComputeFn[C, P, Generator[Y, S, Rt]]: ...
+        self, func: Callable[P, Generator[Y, S, Rt]]
+    ) -> Callable[P, Generator[Y, S, Rt]]: ...
     @overload
-    def __call__(self, func: ComputeFn[C, P, R]) -> ComputeFn[C, P, R]: ...
+    def __call__(self, func: Callable[P, R]) -> Callable[P, R]: ...
 
 
 @contextmanager
@@ -255,26 +256,73 @@ def _traced_span(context: ExecutionContext, name: str) -> Generator[None, None, 
             dagster_builtin_log.removeFilter(log_filter)
 
 
+#: The first-parameter names Dagster treats as "this compute function takes a
+#: context" -- mirrors `is_context_provided()`/`get_valid_name_permutations("context")`
+#: in dagster/_core/definitions/decorators/op_decorator.py and decorator_utils.py
+#: (checked against 1.13.22). Private there, so mirrored rather than imported.
+_CONTEXT_PARAM_NAMES = frozenset({"context", "_context", "context_", "_"})
+
+
+def _context_param(func: Callable[..., Any]) -> str | None:
+    """The name of `func`'s context parameter, or None if Dagster won't pass it one.
+
+    Decided the same way Dagster decides it -- from `inspect.signature()`, which
+    follows `__wrapped__`. So this sees exactly what Dagster sees when it inspects the
+    `@wraps(func)` wrapper returned below: the original function's parameters, not the
+    wrapper's own `*args, **kwargs`."""
+    params = list(inspect.signature(func).parameters.values())
+    if params and params[0].name in _CONTEXT_PARAM_NAMES:
+        return params[0].name
+    return None
+
+
+def _current_context() -> ExecutionContext:
+    """The running step's context, for a compute function that doesn't take one
+    (Issue #94). `AssetCheckExecutionContext.get()` first: inside an asset check,
+    `OpExecutionContext.get()` succeeds too but returns the plain op context, which
+    lacks `.selected_asset_check_keys` -- confirmed against real Dagster 1.13.22.
+    Outside an asset check, `AssetCheckExecutionContext.get()` raises instead."""
+    try:
+        return AssetCheckExecutionContext.get()
+    except DagsterInvariantViolationError:
+        return OpExecutionContext.get()
+
+
 def _traced_decorator(span_name: str | None) -> _TracedDecorator:
     """The actual `@traced(...)`-called-form decorator -- also what a bare `@traced`
     reduces to underneath (with `span_name=None`), see `traced()` below."""
 
     def wrapper(func: Callable[..., Any]) -> Callable[..., Any]:
         name = span_name or func.__name__
+        # Issue #94: a context-less compute function (`@asset def x(): ...`, Dagster's
+        # own canonical form) used to fail at run time with `x() missing 1 required
+        # positional argument: 'context'` -- Dagster reads the original signature
+        # through `@wraps`, sees no context parameter, and calls the wrapper without
+        # one. Such a function now gets its context from `_current_context()` instead,
+        # and is called with exactly the arguments Dagster passed.
+        context_param = _context_param(func)
+
+        def context_of(args: tuple[Any, ...], kwargs: dict[str, Any]) -> ExecutionContext:
+            if context_param is None:
+                return _current_context()
+            # Dagster passes the context positionally, first (`invoke_compute_fn`:
+            # `fn(context, **kwargs)`); by keyword only when someone calls the
+            # function directly, e.g. `my_op(context=build_op_context())`.
+            return args[0] if args else kwargs[context_param]
 
         if inspect.isgeneratorfunction(func):
 
             @wraps(func)
-            def inner(context: ExecutionContext, *args: Any, **kwargs: Any) -> Any:
-                with _traced_span(context, name):
-                    yield from func(context, *args, **kwargs)
+            def inner(*args: Any, **kwargs: Any) -> Any:
+                with _traced_span(context_of(args, kwargs), name):
+                    yield from func(*args, **kwargs)
 
         else:
 
             @wraps(func)
-            def inner(context: ExecutionContext, *args: Any, **kwargs: Any) -> Any:
-                with _traced_span(context, name):
-                    return func(context, *args, **kwargs)
+            def inner(*args: Any, **kwargs: Any) -> Any:
+                with _traced_span(context_of(args, kwargs), name):
+                    return func(*args, **kwargs)
 
         return inner
 
@@ -282,11 +330,9 @@ def _traced_decorator(span_name: str | None) -> _TracedDecorator:
 
 
 @overload
-def traced(
-    func: ComputeFn[C, P, Generator[Y, S, Rt]], /
-) -> ComputeFn[C, P, Generator[Y, S, Rt]]: ...
+def traced(func: Callable[P, Generator[Y, S, Rt]], /) -> Callable[P, Generator[Y, S, Rt]]: ...
 @overload
-def traced(func: ComputeFn[C, P, R], /) -> ComputeFn[C, P, R]: ...
+def traced(func: Callable[P, R], /) -> Callable[P, R]: ...
 @overload
 def traced(span_name: str | None = None) -> _TracedDecorator: ...
 def traced(span_name: Any = None) -> Any:
@@ -303,6 +349,10 @@ def traced(span_name: Any = None) -> Any:
         @traced
         def my_other_op(context) -> None:
             ...
+
+    The compute function doesn't have to take a `context` parameter: one without it
+    (`@asset def x(): ...`) is traced the same way, with the context fetched from
+    Dagster itself (see `_current_context()`).
 
     Looks up the trace context published by publish_trace_context() (falling back up
     to the run root, and across ancestor runs for retries) and activates it, so the

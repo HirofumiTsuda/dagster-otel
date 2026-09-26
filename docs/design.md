@@ -1451,6 +1451,60 @@ writing strict trace-shape assertions against the previously-broken shape would 
 meant either encoding the bug as "expected" or shipping a CI job that fails
 immediately, neither of which was the goal at the time.
 
+## Context-less compute functions (Issue #94, 2026-09-26)
+
+`traced()`'s wrappers used to take the context as a required first parameter
+(`def inner(context, *args, **kwargs)`). Dagster decides whether to pass a context by
+inspecting the compute function's signature -- `inspect.signature()` on what it was
+given, which follows the `__wrapped__` that `@wraps` sets -- so for a function with no
+context parameter (`@asset def x(): ...`, Dagster's own canonical form) it saw no
+context parameter, called the wrapper with none, and the step failed at run time with
+`x() missing 1 required positional argument: 'context'`. Manual users could add the
+parameter, but `opentelemetry-instrumentation-dagster` applies `traced()` to every
+`@op`/`@asset`/`@asset_check` automatically, so there it broke every context-less asset
+in an existing codebase (that repo's #32).
+
+Now the wrapper is `inner(*args, **kwargs)`, and the context comes from one of two
+places, decided once at decoration time by `_context_param()`:
+
+- **The function declares one:** `args[0]`, exactly as before. Dagster always passes the
+  context positionally and first (`invoke_compute_fn`: `fn(context, **kwargs)`); inputs,
+  config and resources go by keyword, so nothing else shifts. (A direct call such as
+  `my_op(context=build_op_context())` passes it by keyword instead; that's handled too.)
+  `_context_param()` mirrors
+  Dagster's own rule (`is_context_provided()`: first parameter named `context`,
+  `_context`, `context_` or `_`) rather than importing it, since it's private.
+- **It doesn't:** `_current_context()`, which reads Dagster's public
+  `AssetCheckExecutionContext.get()` and falls back to `OpExecutionContext.get()`. The
+  order matters: inside an asset check, `OpExecutionContext.get()` also succeeds but
+  returns the plain op context, which has no `.selected_asset_check_keys`, so the
+  `dagster.asset_check_keys` attribute would silently disappear. Both `.get()`s exist
+  back to at least dagster 1.5.14, so this doesn't move the version floor (#86 is the
+  separate floor problem).
+
+The public overloads also changed from `Callable[Concatenate[C, P], R]` (the old
+`ComputeFn`) to plain `Callable[P, R]`: requiring a context parameter in the type would
+reject the context-less form at type-check time just as the old wrapper did at run
+time. `P` still captures whatever the function declares, including a specific context
+type, so the contravariance problem the generic `C` was introduced for (see the
+`@dbt_assets` verification above) doesn't come back.
+
+Verified against real Dagster 1.13.22 (opentelemetry-sdk 1.44.0) + Jaeger, multiprocess
+executor, every step in its own subprocess (PIDs 388411/388412/388499/388528/388529):
+context-less `root_a`/`root_b` feeding a context-less `merged`, plus a context-less
+`@asset_check` on `merged` and an untraced downstream asset. Jaeger (one trace):
+
+```
+op=merged_check   refs=[('CHILD_OF', 'merged')]
+op=root_a         refs=[]
+op=root_b         refs=[]
+op=merged         refs=[('CHILD_OF', 'root_a'), ('FOLLOWS_FROM', 'root_b')]
+```
+
+Log correlation through `get_dagster_logger()` (the only logger a context-less function
+has) still works and stays scoped: `inside root_a`/`inside merged` carry
+`trace_id`/`span_id`, the untraced asset's line carries neither.
+
 ## License
 
 MIT -- matches [dagster-prometheus-exporter](https://github.com/HirofumiTsuda/dagster-prometheus-exporter)

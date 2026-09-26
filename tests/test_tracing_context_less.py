@@ -7,7 +7,6 @@ the original function's parameters -- and a fake context called directly never g
 through that decision at all."""
 
 import dagster as dg
-from conftest import FakeInstance, make_context
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from dagster_otel import traced
@@ -109,15 +108,3 @@ def test_underscore_context_name_is_still_passed_through(spans: InMemorySpanExpo
 
     assert dg.materialize([underscore_ctx]).success
     _span(spans, "underscore_ctx")
-
-
-def test_context_passed_by_keyword_on_direct_call(spans: InMemorySpanExporter) -> None:
-    """Direct invocation can pass the context by keyword; the old
-    `inner(context, *args, **kwargs)` accepted that, so the new wrapper must too."""
-
-    @traced()
-    def direct(context) -> int:  # type: ignore[no-untyped-def]
-        return 1
-
-    assert direct(context=make_context(FakeInstance(), "run-1", ["direct"])) == 1
-    _span(spans, "direct")

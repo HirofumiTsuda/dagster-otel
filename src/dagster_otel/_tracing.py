@@ -289,7 +289,8 @@ def _traced_decorator(span_name: str | None) -> _TracedDecorator:
             # so a positional argument is present exactly when Dagster passed a
             # context. Deciding from what was actually passed, rather than predicting
             # Dagster's own "does this function take a context" rule from the
-            # signature, can't drift from that rule if Dagster ever changes it.
+            # signature, can't drift from that rule if Dagster ever changes it. It
+            # does still depend on the calling convention itself; see Issue #98.
             return args[0] if args else _current_context()
 
         if inspect.isgeneratorfunction(func):

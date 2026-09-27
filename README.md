@@ -221,11 +221,12 @@ referenced as an external published image, not vendored here. See
 Built and verified against **Dagster 1.13.22** and **`opentelemetry-sdk` 1.44.0**
 (`pyproject.toml`/`uv.lock`) -- this is the combination every behavior described here
 has actually been checked against, including the `multiprocess`/`k8s_job_executor`/
-retry-from-failure verification in [docs/design.md](docs/design.md). `pyproject.toml`
-declares a much wider floor (`dagster >= 1.5`) since nothing here relies on
-version-specific Dagster internals beyond what's documented as an accepted-risk
-private-API dependency there -- but that wide range isn't individually spot-checked
-the way it is for [dagster-prometheus-exporter](https://github.com/HirofumiTsuda/dagster-prometheus-exporter#compatibility).
+retry-from-failure verification in [docs/design.md](docs/design.md).
+
+The declared floor is **`dagster >= 1.10`**. CI runs the full test suite against both
+the locked version and the newest 1.10 patch. 1.10.21 was also checked with a
+multiprocess run against a real Jaeger. Dagster 1.9 and older aren't supported:
+`dagster_otel.dbt` can't be imported there (see [#86](https://github.com/HirofumiTsuda/dagster-otel/issues/86)).
 If you hit an incompatibility on another version, please
 [open an issue](https://github.com/HirofumiTsuda/dagster-otel/issues/new/choose).
 

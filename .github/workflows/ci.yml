@@ -18,6 +18,24 @@ jobs:
 
       - run: uv run pytest
 
+  # Issue #86: the declared `dagster >= X` floor drifted from reality once because
+  # `test` above only ever runs the locked (latest-verified) Dagster. This runs the
+  # same suite against the floor's newest patch, so a change that needs something
+  # newer fails here instead of on users' installs. Python 3.10 = this package's own
+  # floor (requires-python), and old enough for any Dagster minor worth supporting.
+  # Plain venv + `uv pip`, not `uv sync`: the lockfile pins the latest Dagster.
+  test-dagster-floor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.1.0
+
+      - run: uv venv --python 3.10 .venv-floor
+      - run: VIRTUAL_ENV=.venv-floor uv pip install -e . "dagster==1.10.*" "pytest>=7"
+      - run: .venv-floor/bin/python -c "import dagster; print(dagster.__version__)"
+      - run: .venv-floor/bin/python -m pytest
+
   lint:
     runs-on: ubuntu-latest
     steps:

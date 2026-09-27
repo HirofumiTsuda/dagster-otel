@@ -1631,7 +1631,9 @@ function, including ones the user already decorated (that repo's #34).
 
 Every wrapper either decorator returns now carries `__dagster_otel_traced__ = True`
 (`_TRACED_MARKER`), and both check for it first and return an already-marked function
-unchanged. So the innermost, user-written decorator wins, including its explicit span
+unchanged. The check and the marking live in one decorator, `_idempotent`, applied to
+each one's `func -> wrapped func` step, so no return path of either wrapper (plain,
+generator, coroutine, async generator, dbt) can forget the marker. So the innermost, user-written decorator wins, including its explicit span
 name. Design points:
 
 - **One marker for both decorators.** An explicit `@traced()` on a `@dbt_assets` body

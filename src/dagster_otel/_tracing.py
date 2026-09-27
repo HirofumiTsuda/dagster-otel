@@ -314,27 +314,39 @@ def _is_traced(func: Callable[..., Any]) -> bool:
     return getattr(func, _TRACED_MARKER, False) is True
 
 
-def _mark_traced(func: Callable[..., Any]) -> Callable[..., Any]:
-    setattr(func, _TRACED_MARKER, True)
-    return func
+W = TypeVar("W", bound=Callable[[Any], Any])
+
+
+def _idempotent(wrap: W) -> W:
+    """Makes a `func -> wrapped func` step of a tracing decorator idempotent (Issue
+    #96): an already-traced `func` comes back unchanged, and anything `wrap` returns
+    gets the marker. Applied to both `traced()`'s and `traced_dbt()`'s wrapper, so the
+    check and the marking live in exactly one place.
+
+    Wrapping an already-traced function again gave two spans per step, and the inner
+    layer's publish_trace_context() overwrote the outer's, so downstream steps
+    parented onto the inner span. That's the normal state under
+    opentelemetry-instrumentation-dagster, which applies traced() on top of every
+    compute function, including ones the user already decorated. The innermost
+    (user-written) decorator wins, including its explicit span name."""
+
+    @wraps(wrap)
+    def guarded(func: Callable[..., Any]) -> Callable[..., Any]:
+        if _is_traced(func):
+            return func
+        wrapped = wrap(func)
+        setattr(wrapped, _TRACED_MARKER, True)
+        return wrapped
+
+    return cast(W, guarded)
 
 
 def _traced_decorator(span_name: str | None) -> _TracedDecorator:
     """The actual `@traced(...)`-called-form decorator -- also what a bare `@traced`
     reduces to underneath (with `span_name=None`), see `traced()` below."""
 
+    @_idempotent
     def wrapper(func: Callable[..., Any]) -> Callable[..., Any]:
-        # Issue #96: wrapping an already-traced function again gave two spans per
-        # step, and the inner layer's publish_trace_context() overwrote the outer's,
-        # so downstream steps parented onto the inner span. This is the normal state
-        # under opentelemetry-instrumentation-dagster, which applies traced() on top
-        # of every compute function, including ones the user already decorated. The
-        # innermost (user-written) decorator wins, including its explicit span name.
-        if _is_traced(func):
-            return func
-        return _mark_traced(_wrap(func))
-
-    def _wrap(func: Callable[..., Any]) -> Callable[..., Any]:
         name = span_name
         # Issue #94: a context-less compute function (`@asset def x(): ...`, Dagster's
         # own canonical form) used to fail at run time with `x() missing 1 required

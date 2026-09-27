@@ -9,6 +9,7 @@ follow [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 - `@traced()` on a compute function without a `context` parameter (`@asset def x(): ...`, Dagster's own canonical form) no longer fails at run time with `x() missing 1 required positional argument: 'context'` ([#94](https://github.com/HirofumiTsuda/dagster-otel/issues/94)). The context is now fetched with Dagster's public `OpExecutionContext.get()` when the function doesn't take one. Works for `@op`, `@asset` and `@asset_check`, plain and generator functions. Type hints accept context-less functions too. Fixes the same crash under `opentelemetry-instrumentation-dagster`, which applies `traced()` automatically ([opentelemetry-instrumentation-dagster#32](https://github.com/HirofumiTsuda/opentelemetry-instrumentation-dagster/issues/32)).
+- `@traced()` on an `async def` compute function no longer breaks the step ([#93](https://github.com/HirofumiTsuda/dagster-otel/issues/93)). The wrapper used to be a plain `def`, so Dagster didn't recognize it as async and took the never-awaited coroutine as the step's output (`TypeError: cannot pickle 'coroutine' object`). Coroutines and async generators now each get a matching async wrapper, and the span covers the awaited work. For async generators, the span stays current across `yield`s, even though Dagster steps each item in a fresh asyncio Task. Fixes the same failure under `opentelemetry-instrumentation-dagster` ([opentelemetry-instrumentation-dagster#33](https://github.com/HirofumiTsuda/opentelemetry-instrumentation-dagster/issues/33)).
 
 ### Changed
 

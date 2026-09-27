@@ -5,7 +5,8 @@
 def my_op(context, x: int) -> int:
     ...
 
-Handles both plain-return and generator compute functions. This matters concretely
+Handles plain-return, generator, coroutine (`async def`) and async-generator compute
+functions (the async two: Issue #93, see `_traced_decorator`). This matters concretely
 for @dbt_assets, which Dagster requires to be defined as a generator
 (`yield from dbt.cli(...).stream()`) -- a naive wrapper that always does
 `return func(context, *args, **kwargs)` would hand Dagster an unconsumed generator
@@ -47,11 +48,12 @@ already truthy" territory downstream. A footgun worth a real fix, not a docs not
 given `@op`/`@asset` train users to expect bare use directly above this decorator.
 """
 
+import contextvars
 import inspect
-from collections.abc import Callable, Generator
+from collections.abc import AsyncGenerator, Callable, Coroutine, Generator
 from contextlib import contextmanager
 from functools import wraps
-from typing import Any, ParamSpec, Protocol, TypeVar, overload
+from typing import Any, Generic, ParamSpec, Protocol, TypeVar, cast, overload
 
 from dagster import OpExecutionContext, get_dagster_logger
 from opentelemetry import trace
@@ -79,6 +81,7 @@ R = TypeVar("R")
 Y = TypeVar("Y")
 S = TypeVar("S")
 Rt = TypeVar("Rt")
+T = TypeVar("T")
 
 #: The overloads below type the compute function as a plain `Callable[P, ...]`, not
 #: `Callable[Concatenate[Context, P], ...]`: since Issue #94 the context parameter is
@@ -256,6 +259,35 @@ def _traced_span(context: ExecutionContext, name: str) -> Generator[None, None, 
             dagster_builtin_log.removeFilter(log_filter)
 
 
+class _run_in_context(Generic[T]):  # noqa: N801 -- used like a function, `await _run_in_context(...)`
+    """Awaitable that runs `coro` with every one of its steps inside `ctx`.
+
+    The same thing an asyncio Task does for its own Context (`context.run(coro.send,
+    ...)` per step), just for a Context chosen here rather than the Task's. Only used
+    to keep one Context across an async generator's items, see `_traced_decorator`.
+    """
+
+    def __init__(self, ctx: contextvars.Context, coro: Coroutine[Any, Any, T]) -> None:
+        self._ctx = ctx
+        self._coro = coro
+
+    def __await__(self) -> Generator[Any, Any, T]:
+        send_value: Any = None
+        thrown: BaseException | None = None
+        while True:
+            try:
+                if thrown is None:
+                    yielded = self._ctx.run(self._coro.send, send_value)
+                else:
+                    yielded = self._ctx.run(self._coro.throw, thrown)
+            except StopIteration as stop:
+                return cast(T, stop.value)
+            try:
+                send_value, thrown = (yield yielded), None
+            except BaseException as exc:  # noqa: BLE001 -- forwarded into the coroutine
+                send_value, thrown = None, exc
+
+
 def _traced_decorator(span_name: str | None) -> _TracedDecorator:
     """The actual `@traced(...)`-called-form decorator -- also what a bare `@traced`
     reduces to underneath (with `span_name=None`), see `traced()` below."""
@@ -287,6 +319,47 @@ def _traced_decorator(span_name: str | None) -> _TracedDecorator:
             def inner(*args: Any, **kwargs: Any) -> Any:
                 with _traced_span(context_of(args), name):
                     yield from func(*args, **kwargs)
+
+        elif inspect.iscoroutinefunction(func):
+
+            @wraps(func)
+            async def coroutine_inner(*args: Any, **kwargs: Any) -> Any:
+                with _traced_span(context_of(args), name):
+                    return await func(*args, **kwargs)
+
+            return coroutine_inner
+
+        elif inspect.isasyncgenfunction(func):
+
+            async def traced_agen(*args: Any, **kwargs: Any) -> AsyncGenerator[Any, None]:
+                with _traced_span(context_of(args), name):
+                    async for item in func(*args, **kwargs):
+                        yield item
+
+            @wraps(func)
+            async def async_generator_inner(*args: Any, **kwargs: Any) -> Any:
+                # Dagster drives an async generator one item at a time, each in a
+                # fresh asyncio Task (`gen_from_async_gen`:
+                # `event_loop.run_until_complete(async_gen.__anext__())`), and every
+                # Task runs in its own copy of the contextvars Context. Iterated
+                # naively, `_traced_span`'s OTel context would be current only until
+                # the first `yield` -- confirmed against real Dagster 1.13.22: a span
+                # started after it had no parent, and the final detach logged
+                # "Failed to detach context" (a token from a different Context). So
+                # every step of `traced_agen` runs in one Context pinned here instead.
+                pinned = contextvars.copy_context()
+                agen = traced_agen(*args, **kwargs)
+                try:
+                    while True:
+                        try:
+                            item = await _run_in_context(pinned, agen.__anext__())
+                        except StopAsyncIteration:
+                            return
+                        yield item
+                finally:
+                    await _run_in_context(pinned, agen.aclose())
+
+            return async_generator_inner
 
         else:
 
@@ -320,6 +393,8 @@ def traced(span_name: Any = None) -> Any:
         @traced
         def my_other_op(context) -> None:
             ...
+
+    Works on plain, generator, `async def` and async-generator compute functions alike.
 
     The compute function doesn't have to take a `context` parameter: one without it
     (`@asset def x(): ...`) is traced the same way, with the context fetched from

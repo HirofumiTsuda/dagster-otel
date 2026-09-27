@@ -1527,6 +1527,56 @@ Log correlation through `get_dagster_logger()` (the only logger a context-less f
 has) still works and stays scoped: `inside root_a`/`inside merged` carry
 `trace_id`/`span_id`, the untraced asset's line carries neither.
 
+## `async def` compute functions (Issue #93, 2026-09-27)
+
+`traced()` only distinguished generator functions from everything else, so an `async
+def` compute function got the plain `def` wrapper. Dagster picks how to drive a compute
+function by inspecting it (`inspect.iscoroutinefunction`/`isasyncgenfunction`), saw a
+plain function, called it, and took the returned, never-awaited coroutine (or async
+generator) as the step's output: `TypeError: cannot pickle 'coroutine' object`, with the
+user's code never running and a ~2 ms span around creating the coroutine.
+
+Now each kind gets a wrapper of the same kind:
+
+- **Coroutine:** `async def` wrapper doing `with _traced_span(...): return await
+  func(...)`. Dagster awaits it inside a single `run_until_complete` call
+  (`_coerce_async_op_to_async_gen` awaits the whole coroutine before yielding
+  anything), so `_traced_span`'s attach/detach happen in one Task and nothing special
+  is needed.
+- **Async generator:** needs more. Dagster steps an async generator one item at a time
+  (`gen_from_async_gen`: `event_loop.run_until_complete(async_gen.__anext__())`), so
+  every item runs in a *fresh* asyncio Task, each with its own copy of the contextvars
+  Context. With the obvious `with _traced_span(...): async for item in func(...): yield
+  item`, the OTel context attached before the first `yield` is gone after it.
+  Confirmed against real Dagster 1.13.22: the current span after the first `yield` was
+  the invalid span, a user span started there had no parent, and the final detach
+  logged `Failed to detach context` (`ValueError: ... Token was created in a different
+  Context`). The wrapper therefore copies one Context up front and drives every step of
+  the inner traced generator (including its final `aclose()`) inside it via
+  `_run_in_context`, an awaitable doing per step what an asyncio Task does for its own
+  Context (`ctx.run(coro.send, ...)`). `asyncio.create_task(..., context=ctx)` would be
+  the stdlib way, but it needs Python 3.11 and this package supports 3.10.
+
+`traced_dbt()` is untouched: `@dbt_assets` bodies are sync generators (`yield from
+dbt.cli(...).stream()`).
+
+Verified against real Dagster 1.13.22 (opentelemetry-sdk 1.44.0) + Jaeger, multiprocess
+executor, each step in its own subprocess (PIDs 438574/438624/438664/438714): an async
+`root_coro` feeding an async-generator `@multi_asset` `agen_pair` (two outputs, a user
+span and a `context.log` line after the first `yield`), feeding a context-less async
+`merged`, plus an untraced tail. Jaeger (one trace):
+
+```
+op=root_coro              dur=   362ms refs=[]
+op=agen_pair              dur=   486ms refs=[('CHILD_OF', 'root_coro')]
+op=user_span_after_yield  dur=     0ms refs=[('CHILD_OF', 'agen_pair')]
+op=merged                 dur=    36ms refs=[('CHILD_OF', 'agen_pair')]
+```
+
+Log lines after an `await` and after a `yield` carry `trace_id`/`span_id`, the untraced
+asset's line carries neither, and `Failed to detach context` never appears in the run
+log. The full test suite also passes on Python 3.10 (3.10.12) as well as 3.13.
+
 ## License
 
 MIT -- matches [dagster-prometheus-exporter](https://github.com/HirofumiTsuda/dagster-prometheus-exporter)

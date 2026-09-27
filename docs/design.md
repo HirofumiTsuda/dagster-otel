@@ -1577,6 +1577,41 @@ Log lines after an `await` and after a `yield` carry `trace_id`/`span_id`, the u
 asset's line carries neither, and `Failed to detach context` never appears in the run
 log. The full test suite also passes on Python 3.10 (3.10.12) as well as 3.13.
 
+## Default span name: the running node's name (Issue #95, 2026-09-27)
+
+`traced()` used to default the span name to `func.__name__`, fixed at decoration time.
+Applied underneath `@op`/`@asset`, it can't see their arguments, so whenever Dagster's
+node name differs from the function name, the span name silently diverged. The worst
+case is an asset factory: `@asset(key=["warehouse", table])` on one inner `_asset`
+function gave every table's span the name `_asset`, collapsing them into one
+"operation" in trace UIs that group by span name.
+
+The default is now resolved at run time in `_traced_span()` as
+`context.op_execution_context.op_handle.name`. Measured on 1.13.22:
+
+| Definition | old default (`func.__name__`) | `op_def.name` | `op_handle.name` (new default) |
+|---|---|---|---|
+| `@asset(key=["warehouse","customers"])` on `_asset` | `_asset` | `warehouse__customers` | `warehouse__customers` |
+| `@asset(key_prefix=["raw"])` on `orders` | `orders` | `raw__orders` | `raw__orders` |
+| `@multi_asset(name="my_multi")` on `multi_fn` | `multi_fn` | `my_multi` | `my_multi` |
+| `@asset_check(asset=raw/orders, name="named_check")` on `fn_check` | `fn_check` | `raw__orders_named_check` | `raw__orders_named_check` |
+| `@op(name="renamed_op")` on `some_fn` | `some_fn` | `renamed_op` | `renamed_op` |
+| `base_op.alias("alias_a")` | `base_op` | `base_op` | `alias_a` |
+| `inner_op` inside graph `sub` | `inner_op` | `inner_op` | `inner_op` |
+
+`op_handle.name` over the `@public` `op_def.name` because of the alias row: the
+definition name is shared by every alias, the same "one function, many steps, one span
+name" problem. `op_handle` is `:meta private:` in Dagster's docs; that dependency is
+recorded in #100 (same spirit as #98). The leaf name is used, not the full path
+(`sub.inner_op`), which is already on the span as `dagster.step_key`.
+
+Visible change: span names change for any function whose name differs from its node
+name, notably every `@asset_check` (now `<asset>_<check>`, matching the step in
+Dagster's UI). An explicit `@traced("name")` still wins. `opentelemetry-instrumentation-
+dagster`'s `name=` passthrough becomes redundant once it depends on this release (its
+#35). `traced_sensor()`/`traced_schedule()` keep `func.__name__`: a tick has no op
+node, and Dagster's own default sensor/schedule name is the function name.
+
 ## License
 
 MIT -- matches [dagster-prometheus-exporter](https://github.com/HirofumiTsuda/dagster-prometheus-exporter)

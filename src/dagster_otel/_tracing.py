@@ -106,7 +106,20 @@ class _TracedDecorator(Protocol):
 
 
 @contextmanager
-def _traced_span(context: ExecutionContext, name: str) -> Generator[None, None, None]:
+def _traced_span(context: ExecutionContext, name: str | None) -> Generator[None, None, None]:
+    # Issue #95: with no explicit span name, name the span after the node Dagster is
+    # actually running, resolved here at run time -- not `func.__name__` at decoration
+    # time, which `traced()` (applied underneath `@op`/`@asset`) can't correct for
+    # `@op(name=...)`, `@asset(key=...)`/`key_prefix=`/`name=`, `@multi_asset(name=...)`,
+    # an asset check's `<asset>_<check>` op, or an aliased op
+    # (`my_op.alias("a")`). `op_handle.name` rather than the `@public` `op_def.name`:
+    # the definition name is the same for every alias of one op, which is the same
+    # "one function, many steps, one span name" problem this fixes; the handle's name is
+    # the alias. `op_handle` is `:meta private:` in Dagster's docs -- see Issue #100 for
+    # that dependency. It's the leaf name (`inner_op`, not `sub.inner_op`); the full
+    # path is already on the span as `dagster.step_key`.
+    if name is None:
+        name = context.op_execution_context.op_handle.name
     # Idempotent (see configure()'s docstring) -- a no-op if a @resource or another
     # @traced() step already configured this process. If nothing has, this is what
     # lets `@traced()` alone be enough: no @resource/required_resource_keys wiring
@@ -293,7 +306,7 @@ def _traced_decorator(span_name: str | None) -> _TracedDecorator:
     reduces to underneath (with `span_name=None`), see `traced()` below."""
 
     def wrapper(func: Callable[..., Any]) -> Callable[..., Any]:
-        name = span_name or func.__name__
+        name = span_name
         # Issue #94: a context-less compute function (`@asset def x(): ...`, Dagster's
         # own canonical form) used to fail at run time with `x() missing 1 required
         # positional argument: 'context'` -- Dagster reads the original signature
@@ -410,10 +423,12 @@ def traced(span_name: Any = None) -> Any:
     context.log.* call made inside gets trace_id/span_id attributes forwarded to any
     @logger you've configured (see _logging.py).
 
-    :param span_name: Span name. Defaults to the wrapped function's name. Only
-        meaningful with the called form (`@traced()`/`@traced("name")`) -- with bare
-        `@traced`, this parameter instead receives the function being decorated (see
-        module docstring).
+    :param span_name: Span name. Defaults to the name of the op/asset/check node
+        Dagster is running (its `op_handle.name`, e.g. `warehouse__customers` for
+        `@asset(key=["warehouse", "customers"])`, or the alias for `my_op.alias("a")`),
+        not the Python function's name. Only meaningful with the called form
+        (`@traced()`/`@traced("name")`) -- with bare `@traced`, this parameter instead
+        receives the function being decorated (see module docstring).
     """
     if span_name is None or isinstance(span_name, str):
         return _traced_decorator(span_name)

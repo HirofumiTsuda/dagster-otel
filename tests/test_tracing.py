@@ -43,15 +43,15 @@ def test_traced_bare_preserves_generator_yields() -> None:
     assert list(my_asset(ctx)) == ["a", "b"]
 
 
-def test_traced_bare_default_span_name_is_function_name(spans) -> None:
+def test_traced_bare_default_span_name_is_op_handle_name(spans) -> None:
     @traced
-    def my_named_op(context) -> None:
+    def my_fn(context) -> None:
         pass
 
-    my_named_op(make_context(FakeInstance(), "run-1", ["my_named_op"]))
+    my_fn(make_context(FakeInstance(), "run-1", ["my_node"]))
 
     names = [s.name for s in spans.get_finished_spans()]
-    assert "my_named_op" in names
+    assert names == ["my_node"]
 
 
 def test_traced_preserves_generator_yields() -> None:
@@ -68,15 +68,17 @@ def test_traced_preserves_generator_yields() -> None:
     assert list(my_asset(ctx)) == ["a", "b", "c"]
 
 
-def test_traced_default_span_name_is_function_name(spans) -> None:
+def test_traced_default_span_name_is_op_handle_name(spans) -> None:
+    """Issue #95: the node Dagster is running, not the Python function's name."""
+
     @traced()
-    def my_named_op(context) -> None:
+    def my_fn(context) -> None:
         pass
 
-    my_named_op(make_context(FakeInstance(), "run-1", ["my_named_op"]))
+    my_fn(make_context(FakeInstance(), "run-1", ["my_node"]))
 
     names = [s.name for s in spans.get_finished_spans()]
-    assert "my_named_op" in names
+    assert names == ["my_node"]
 
 
 def test_traced_custom_span_name(spans) -> None:

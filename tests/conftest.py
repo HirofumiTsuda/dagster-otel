@@ -129,12 +129,12 @@ def make_context(
     Dagster defines identically on both OpExecutionContext and AssetExecutionContext,
     so this fake doesn't need to model the two context shapes differently either.
 
-    Doesn't model AssetCheckExecutionContext (Issue #72) -- that context type has a
-    genuinely different shape (`.job_def` but no `.job_name`, `.selected_asset_check_
-    keys` but no `.selected_asset_keys`) that `isinstance()`-checking code (_tracing.
-    py's asset_check_keys branch) can't be satisfied by a SimpleNamespace regardless
-    of which attributes it's given; that behavior is verified against a real Dagster
-    run in test_tracing.py's own asset_check test instead.
+    `.op_execution_context` points back at the fake itself, the same as real
+    Dagster's `OpExecutionContext.op_execution_context` (which returns `self`) --
+    _tracing.py reads `selected_asset_keys`/`selected_asset_check_keys` through it.
+    Doesn't model AssetCheckExecutionContext (Issue #72) as a separate shape: its
+    `.selected_asset_check_keys` is covered by real-Dagster asset_check tests in
+    test_tracing.py and test_tracing_context_less.py instead.
 
     :param deps: step_keys this step directly depends on, matching real Dagster's
         `StepInput.dependency_keys` -- e.g. `deps=["root_op"]` for a step whose only
@@ -161,7 +161,7 @@ def make_context(
     step_execution_context = SimpleNamespace(
         step=SimpleNamespace(step_inputs=step_inputs, key=step_key or ".".join(op_path))
     )
-    return SimpleNamespace(  # type: ignore[return-value]
+    context = SimpleNamespace(
         op_handle=SimpleNamespace(path=op_path),
         run=SimpleNamespace(run_id=run_id),
         job_def=SimpleNamespace(name=job_name),
@@ -171,4 +171,7 @@ def make_context(
         log=logging.getLogger(f"test.{run_id}.{'.'.join(op_path)}"),
         get_step_execution_context=lambda: step_execution_context,
         selected_asset_keys=frozenset(AssetKey(k) for k in (asset_keys or [])),
+        selected_asset_check_keys=frozenset(),
     )
+    context.op_execution_context = context
+    return context  # type: ignore[return-value]

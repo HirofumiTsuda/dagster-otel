@@ -31,7 +31,16 @@ classifiers = [
 dependencies = [
     # A real runtime dependency, not optional -- _propagation.py imports dagster
     # directly (AssetKey, AssetMaterialization, DagsterEventType).
-    "dagster >= 1.5",
+    #
+    # >= 1.10 (Issue #86): the old ">= 1.5" floor was never true once #47/#72 added
+    # imports. `import dagster_otel` fails on 1.5/1.6 (AssetCheckExecutionContext),
+    # and `import dagster_otel.dbt` fails below 1.10 (AssetCheckEvaluation isn't
+    # exported from `dagster` until 1.10). The core traced() suite passed on
+    # 1.7-1.9, but supporting them would mean a private-path import in dbt.py plus
+    # unverified dagster-dbt pairings, so the floor is the oldest minor where
+    # everything passes, including a multiprocess + Jaeger run (docs/design.md).
+    # CI's `test-dagster-floor` job keeps this honest.
+    "dagster >= 1.10",
     "opentelemetry-api >= 1.15, < 2",
     "opentelemetry-sdk >= 1.15, < 2",
     "opentelemetry-exporter-otlp-proto-grpc >= 1.15, < 2",

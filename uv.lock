@@ -493,7 +493,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
-    { name = "dagster", specifier = ">=1.5" },
+    { name = "dagster", specifier = ">=1.10" },
     { name = "opentelemetry-api", specifier = ">=1.15,<2" },
     { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.15,<2" },
     { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.15,<2" },

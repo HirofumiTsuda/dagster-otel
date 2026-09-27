@@ -4,6 +4,12 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- The declared Dagster floor is now `dagster >= 1.10`, matching reality ([#86](https://github.com/HirofumiTsuda/dagster-otel/issues/86)). The old `dagster >= 1.5` let pip install dagster-otel next to a Dagster it can't even be imported with: `import dagster_otel` fails on 1.5/1.6, and `import dagster_otel.dbt` fails below 1.10. 1.10.21 is verified with the full test suite and a multiprocess run against Jaeger. A new CI job, `test-dagster-floor`, runs the suite against `dagster==1.10.*` so the floor can't drift again.
+
 ## [0.5.0](https://github.com/HirofumiTsuda/dagster-otel/releases/tag/v0.5.0) - 2026-09-27
 
 ### Changed

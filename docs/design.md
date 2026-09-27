@@ -1660,6 +1660,49 @@ op=b            refs=[('CHILD_OF', 'custom_name')]
 op=c            refs=[('CHILD_OF', 'b')]
 ```
 
+## Dagster version floor: `>= 1.10` (Issue #86, 2026-09-27)
+
+`pyproject.toml` declared `dagster >= 1.5`, but `import dagster_otel` already failed on
+1.5 and 1.6 (`AssetCheckExecutionContext` isn't exported there), because nothing ever
+ran against the declared floor. Checked for 0.5.0 (`main` at `c80d466`+) with a fresh
+Python 3.10 venv per minor, newest patch each, running the full test suite:
+
+| dagster | full suite | without dbt modules |
+|---|---|---|
+| 1.7.16 | collection error: `dagster_otel.dbt` can't import `AssetCheckEvaluation` | 100 passed |
+| 1.8.13 | same | 100 passed |
+| 1.9.13 | same | 100 passed |
+| 1.10.21 | 111 passed | -- |
+| 1.11.16 | 111 passed | -- |
+| 1.12.22 | 111 passed | -- |
+
+`AssetCheckEvaluation` is exported from `dagster` only from 1.10. It lives at
+`dagster._core.definitions.asset_check_evaluation` in all of 1.7-1.13, so 1.7 could be
+supported with a private-path import in `dbt.py`. That would add another private
+dependency (alongside #98/#100), and it would leave the dagster-dbt pairings for 1.7-1.9
+(dagster-dbt pins dagster 1:1) unverified. So the floor is 1.10, the oldest minor where
+everything passes. Lowering it later isn't breaking for existing users if someone
+needs 1.7-1.9.
+
+On 1.10.21, following the verify-dagster-version-compat skill:
+`DagsterLogManager` still subclasses `logging.Logger`. The two verify-tracing
+scenarios from #94 and #93 ran under the multiprocess executor against Jaeger, each
+step in its own subprocess, with the same trace shape as on 1.13.22:
+
+```
+op=merged               refs=[('CHILD_OF', 'root_a'), ('FOLLOWS_FROM', 'root_b')]
+op=merged_merged_check  refs=[('CHILD_OF', 'merged')]
+op=agen_pair            refs=[('CHILD_OF', 'root_coro')]
+op=user_span_after_yield refs=[('CHILD_OF', 'agen_pair')]
+```
+
+Log lines inside traced steps (including after an `await` and after a `yield`) carry
+`trace_id`/`span_id`, untraced steps' lines don't, and `Failed to detach context`
+never appears.
+
+CI now has a `test-dagster-floor` job running the full suite against `dagster==1.10.*`
+on Python 3.10, so the floor can't silently drift again.
+
 ## License
 
 MIT -- matches [dagster-prometheus-exporter](https://github.com/HirofumiTsuda/dagster-prometheus-exporter)

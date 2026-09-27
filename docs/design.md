@@ -1612,6 +1612,54 @@ dagster`'s `name=` passthrough becomes redundant once it depends on this release
 #35). `traced_sensor()`/`traced_schedule()` keep `func.__name__`: a tick has no op
 node, and Dagster's own default sensor/schedule name is the function name.
 
+## Already-traced functions aren't wrapped again (Issue #96, 2026-09-27)
+
+`traced()`/`traced_dbt()` wrapped whatever they were given. Each layer runs its own
+`_traced_span()` (upstream lookup, parent activation, span, `publish_trace_context()`),
+so a twice-traced step emitted two spans, and the inner layer's publish overwrote the
+outer's, so downstream steps parented onto the inner span:
+
+```
+a            parent: None
+custom_name  parent: a
+b            parent: custom_name    # b hangs off a's inner span, not a
+```
+
+Stacking by hand is unusual, but it's the normal state under
+`opentelemetry-instrumentation-dagster`, which applies `traced()` on top of every compute
+function, including ones the user already decorated (that repo's #34).
+
+Every wrapper either decorator returns now carries `__dagster_otel_traced__ = True`
+(`_TRACED_MARKER`), and both check for it first and return an already-marked function
+unchanged. The check and the marking live in one decorator, `_idempotent`, applied to
+each one's `func -> wrapped func` step, so no return path of either wrapper (plain,
+generator, coroutine, async generator, dbt) can forget the marker. So the innermost, user-written decorator wins, including its explicit span
+name. Design points:
+
+- **One marker for both decorators.** An explicit `@traced()` on a `@dbt_assets` body
+  (one coarse span on purpose) must also stop an outer `traced_dbt()`, and vice versa.
+  `traced_dbt()` checks at its own entry rather than relying on the `traced()` call
+  inside it, so the per-dbt-node layer isn't added on top either.
+- **`functools.wraps` carries the marker outward.** It copies `__dict__`, so a
+  third-party `wraps`-based decorator stacked on a traced function carries the marker
+  too. That's the desired result: the function inside is still traced exactly once.
+  It doesn't flow inward: tracing `fn` never marks `fn` itself.
+- Done in this package rather than detected by the instrumentation, so that package
+  needs no detection logic of its own (e.g. walking `__wrapped__` and matching
+  `__code__.co_filename` against this package's file layout), only a version-floor bump.
+
+Verified: under `opentelemetry-instrumentation-dagster` (local checkout at `9696f20`,
+`DagsterInstrumentor().instrument()`), `@asset @traced("custom_name") a` + `b(a)` now
+emits exactly `custom_name` and `b` (`b` CHILD_OF `custom_name`). Also against real
+Dagster 1.13.22 + Jaeger, multiprocess executor (PIDs 450888/450923/450967), with
+`a` = `@traced() @traced("custom_name")`, `b`, and `c` = `@traced() @traced()`:
+
+```
+op=custom_name  refs=[]
+op=b            refs=[('CHILD_OF', 'custom_name')]
+op=c            refs=[('CHILD_OF', 'b')]
+```
+
 ## License
 
 MIT -- matches [dagster-prometheus-exporter](https://github.com/HirofumiTsuda/dagster-prometheus-exporter)

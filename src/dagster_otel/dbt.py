@@ -73,7 +73,7 @@ from dagster import (
 from opentelemetry import trace
 from opentelemetry.trace import NonRecordingSpan, Span, Status, StatusCode
 
-from dagster_otel._tracing import traced
+from dagster_otel._tracing import _idempotent, traced
 from dagster_otel._types import AssetOrOpExecutionContext
 
 _tracer = trace.get_tracer("dagster_otel.dbt")
@@ -173,6 +173,10 @@ def _traced_dbt_decorator(
     below. Same split, same reason, as `traced()`/`_traced_decorator()` in
     `_tracing.py`."""
 
+    # Issue #96: an already-traced func (by traced() or traced_dbt()) comes back
+    # unchanged -- checked here, not only inside the traced() call below, so the
+    # per-dbt-node layer isn't stacked on top either. See _tracing.py's _idempotent.
+    @_idempotent
     def wrapper(func: DbtComputeFn[C, P, Y]) -> DbtComputeFn[C, P, Y]:
         # Reuses traced()'s own generator-handling branch entirely -- the step's own
         # span, propagation, dagster.* attributes, log filter: all of it, unmodified.

@@ -73,7 +73,7 @@ from dagster import (
 from opentelemetry import trace
 from opentelemetry.trace import NonRecordingSpan, Span, Status, StatusCode
 
-from dagster_otel._tracing import traced
+from dagster_otel._tracing import _is_traced, _mark_traced, traced
 from dagster_otel._types import AssetOrOpExecutionContext
 
 _tracer = trace.get_tracer("dagster_otel.dbt")
@@ -174,6 +174,12 @@ def _traced_dbt_decorator(
     `_tracing.py`."""
 
     def wrapper(func: DbtComputeFn[C, P, Y]) -> DbtComputeFn[C, P, Y]:
+        # Issue #96: already traced (by traced() or traced_dbt()) -- leave it alone,
+        # see _tracing.py's _TRACED_MARKER. Checked here, not only inside the traced()
+        # call below, so the per-dbt-node layer isn't added on top either.
+        if _is_traced(func):
+            return func
+
         # Reuses traced()'s own generator-handling branch entirely -- the step's own
         # span, propagation, dagster.* attributes, log filter: all of it, unmodified.
         traced_func = traced(span_name)(func)
@@ -210,6 +216,7 @@ def _traced_dbt_decorator(
                     _emit_check_span(event, duration_seconds, asset_spans.get(event.asset_key))
                 yield event
 
+        _mark_traced(inner)
         return inner
 
     return wrapper

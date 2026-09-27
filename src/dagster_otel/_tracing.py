@@ -301,11 +301,40 @@ class _run_in_context(Generic[T]):  # noqa: N801 -- used like a function, `await
                 send_value, thrown = None, exc
 
 
+#: Set on every wrapper `traced()`/`traced_dbt()` return (Issue #96), so a function
+#: that's already traced isn't wrapped again. One marker shared by both: an explicit
+#: `@traced()` on a `@dbt_assets` body (one coarse span) must also stop an outer
+#: `traced_dbt()`, and vice versa. `functools.wraps` copies `__dict__`, so a
+#: third-party decorator stacked on a traced function carries the marker too, which
+#: is what we want: the function inside is still traced exactly once.
+_TRACED_MARKER = "__dagster_otel_traced__"
+
+
+def _is_traced(func: Callable[..., Any]) -> bool:
+    return getattr(func, _TRACED_MARKER, False) is True
+
+
+def _mark_traced(func: Callable[..., Any]) -> Callable[..., Any]:
+    setattr(func, _TRACED_MARKER, True)
+    return func
+
+
 def _traced_decorator(span_name: str | None) -> _TracedDecorator:
     """The actual `@traced(...)`-called-form decorator -- also what a bare `@traced`
     reduces to underneath (with `span_name=None`), see `traced()` below."""
 
     def wrapper(func: Callable[..., Any]) -> Callable[..., Any]:
+        # Issue #96: wrapping an already-traced function again gave two spans per
+        # step, and the inner layer's publish_trace_context() overwrote the outer's,
+        # so downstream steps parented onto the inner span. This is the normal state
+        # under opentelemetry-instrumentation-dagster, which applies traced() on top
+        # of every compute function, including ones the user already decorated. The
+        # innermost (user-written) decorator wins, including its explicit span name.
+        if _is_traced(func):
+            return func
+        return _mark_traced(_wrap(func))
+
+    def _wrap(func: Callable[..., Any]) -> Callable[..., Any]:
         name = span_name
         # Issue #94: a context-less compute function (`@asset def x(): ...`, Dagster's
         # own canonical form) used to fail at run time with `x() missing 1 required

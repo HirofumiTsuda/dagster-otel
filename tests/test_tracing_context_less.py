@@ -76,10 +76,10 @@ def test_context_less_op_runs_and_is_traced(spans: InMemorySpanExporter) -> None
     assert _span(spans, "no_ctx_op").attributes["dagster.job_name"] == "no_ctx_job"  # type: ignore[index]
 
 
-def test_context_less_asset_check_gets_the_asset_check_context(spans: InMemorySpanExporter) -> None:
-    """Inside an asset check, `OpExecutionContext.get()` also succeeds but returns the
-    plain op context -- the check keys attribute only appears if the check context
-    was the one picked up."""
+def test_context_less_asset_check_reports_its_check_key(spans: InMemorySpanExporter) -> None:
+    """`OpExecutionContext.get()` inside an asset check returns the plain op context,
+    which still carries the step's `selected_asset_check_keys`. The span is named
+    after the check's op (`<asset>_<check>`, Issue #95)."""
 
     @dg.asset
     def checked() -> int:
@@ -91,7 +91,7 @@ def test_context_less_asset_check_gets_the_asset_check_context(spans: InMemorySp
         return dg.AssetCheckResult(passed=True)
 
     assert dg.materialize([checked, no_ctx_check]).success
-    span = _span(spans, "no_ctx_check")
+    span = _span(spans, "checked_no_ctx_check")
     assert span.attributes is not None
     assert span.attributes["dagster.asset_check_keys"] == "checked:no_ctx_check"
 

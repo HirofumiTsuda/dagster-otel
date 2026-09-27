@@ -13,6 +13,7 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Default span name is now the Dagster node's name, not the Python function's name** ([#95](https://github.com/HirofumiTsuda/dagster-otel/issues/95)). With no explicit `span_name`, `@traced()` resolves the name at run time from the running node's `op_handle.name`, so it follows `@asset(key=...)`/`key_prefix=`/`name=`, `@op(name=...)`, `@multi_asset(name=...)`, `.alias()`, and asset checks (`<asset>_<check>`). Factory-built assets (`@asset(key=[..., table])` on one inner function) previously all shared one span name. **Span names change** for any function whose name differs from its node name, including every `@asset_check`. An explicit `@traced("name")` is unaffected. The `op_handle` dependency is tracked in [#100](https://github.com/HirofumiTsuda/dagster-otel/issues/100).
 - `dagster.asset_check_keys` is now also set on `@asset` spans whose asset declares inline `check_specs`, not only on `@asset_check` spans. Both `dagster.asset_keys` and `dagster.asset_check_keys` are now read from the step's underlying op context, without branching on the context type.
 
 ## [0.4.1](https://github.com/HirofumiTsuda/dagster-otel/releases/tag/v0.4.1) - 2026-09-23

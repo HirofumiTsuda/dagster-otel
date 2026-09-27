@@ -162,7 +162,7 @@ def make_context(
         step=SimpleNamespace(step_inputs=step_inputs, key=step_key or ".".join(op_path))
     )
     context = SimpleNamespace(
-        op_handle=SimpleNamespace(path=op_path),
+        op_handle=SimpleNamespace(path=op_path, name=op_path[-1]),
         run=SimpleNamespace(run_id=run_id),
         job_def=SimpleNamespace(name=job_name),
         retry_number=retry_number,

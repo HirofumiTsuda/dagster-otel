@@ -8,7 +8,11 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- `@traced()` on a compute function without a `context` parameter (`@asset def x(): ...`, Dagster's own canonical form) no longer fails at run time with `x() missing 1 required positional argument: 'context'` ([#94](https://github.com/HirofumiTsuda/dagster-otel/issues/94)). The context is now fetched with Dagster's public `AssetCheckExecutionContext.get()`/`OpExecutionContext.get()` when the function doesn't take one. Works for `@op`, `@asset` and `@asset_check`, plain and generator functions. Type hints accept context-less functions too. Fixes the same crash under `opentelemetry-instrumentation-dagster`, which applies `traced()` automatically ([opentelemetry-instrumentation-dagster#32](https://github.com/HirofumiTsuda/opentelemetry-instrumentation-dagster/issues/32)).
+- `@traced()` on a compute function without a `context` parameter (`@asset def x(): ...`, Dagster's own canonical form) no longer fails at run time with `x() missing 1 required positional argument: 'context'` ([#94](https://github.com/HirofumiTsuda/dagster-otel/issues/94)). The context is now fetched with Dagster's public `OpExecutionContext.get()` when the function doesn't take one. Works for `@op`, `@asset` and `@asset_check`, plain and generator functions. Type hints accept context-less functions too. Fixes the same crash under `opentelemetry-instrumentation-dagster`, which applies `traced()` automatically ([opentelemetry-instrumentation-dagster#32](https://github.com/HirofumiTsuda/opentelemetry-instrumentation-dagster/issues/32)).
+
+### Changed
+
+- `dagster.asset_check_keys` is now also set on `@asset` spans whose asset declares inline `check_specs`, not only on `@asset_check` spans. Both `dagster.asset_keys` and `dagster.asset_check_keys` are now read from the step's underlying op context, without branching on the context type.
 
 ## [0.4.1](https://github.com/HirofumiTsuda/dagster-otel/releases/tag/v0.4.1) - 2026-09-23
 

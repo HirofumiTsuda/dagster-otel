@@ -1475,7 +1475,7 @@ context:
   This covers every name Dagster accepts for it (`context`, `_context`, `context_`, `_`)
   without this library having to know that list.
 - **None was passed:** the function doesn't take one, so the context comes from
-  `_current_context()` instead.
+  Dagster's public `OpExecutionContext.get()` instead.
 
 Decided per call from what was actually passed, not at decoration time from the
 signature. An earlier draft of this change copied Dagster's private
@@ -1486,12 +1486,23 @@ also considered and rejected: Dagster decides by name only (`def x(context)` wit
 annotation gets one; `def x(ctx: AssetExecutionContext)` is treated as an input named
 `ctx`), so an annotation-based check would disagree with Dagster in both directions.
 
-`_current_context()` reads Dagster's public `AssetCheckExecutionContext.get()` and
-falls back to `OpExecutionContext.get()`. The order matters: inside an asset check,
-`OpExecutionContext.get()` also succeeds but returns the plain op context, which has no
-`.selected_asset_check_keys`, so the `dagster.asset_check_keys` attribute would silently
-disappear. Both `.get()`s exist back to at least dagster 1.5.14, so this doesn't move
-the version floor (#86 is the separate floor problem).
+`OpExecutionContext.get()` returns a plain `OpExecutionContext` even inside an `@asset`
+or `@asset_check` step, which is fine: the span attributes are all read from the
+underlying op context. `OpExecutionContext` has both `@public` `selected_asset_keys` and
+`selected_asset_check_keys` for every step kind (confirmed against 1.13.22: an asset
+check step reports its check key there, an asset reports its inline `check_specs`), and
+a context that *was* passed in is normalized to the same thing via
+`.op_execution_context` (`self` on `OpExecutionContext`; not `@public`-decorated, but
+it's what Dagster's own `AssetExecutionContext` deprecation messages direct users to).
+So there's no branching on the context type. An earlier revision of this change tried
+`AssetCheckExecutionContext.get()` first and fell back to `OpExecutionContext.get()` on
+the exception, on the mistaken belief that the op context lacked
+`selected_asset_check_keys`; it doesn't. Reading both keys from the op context also
+means an asset's inline `check_specs` checks now show up in `dagster.asset_check_keys`,
+which the old `isinstance(context, AssetCheckExecutionContext)` branch skipped.
+`OpExecutionContext.get()` exists back to at least dagster 1.5.14;
+`.op_execution_context` doesn't exist there, but this library already can't be
+imported on 1.5/1.6 (#86).
 
 The public overloads also changed from `Callable[Concatenate[C, P], R]` (the old
 `ComputeFn`) to plain `Callable[P, R]`: requiring a context parameter in the type would
@@ -1501,7 +1512,7 @@ type, so the contravariance problem the generic `C` was introduced for (see the
 `@dbt_assets` verification above) doesn't come back.
 
 Verified against real Dagster 1.13.22 (opentelemetry-sdk 1.44.0) + Jaeger, multiprocess
-executor, every step in its own subprocess (PIDs 399661/399662/399730/399780/399781):
+executor, every step in its own subprocess (PIDs 434674/434675/434732/434783/434784):
 context-less `root_a`/`root_b` feeding a context-less `merged`, plus a context-less
 `@asset_check` on `merged` and an untraced downstream asset. Jaeger (one trace):
 

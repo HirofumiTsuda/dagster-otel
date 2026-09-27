@@ -108,3 +108,20 @@ def test_underscore_context_name_is_still_passed_through(spans: InMemorySpanExpo
 
     assert dg.materialize([underscore_ctx]).success
     _span(spans, "underscore_ctx")
+
+
+def test_inline_check_specs_are_reported_on_the_asset_span(spans: InMemorySpanExporter) -> None:
+    """An asset's own `check_specs` checks show up in `dagster.asset_check_keys` on
+    the asset's span, alongside `dagster.asset_keys` -- both read from the op context."""
+
+    @dg.asset(check_specs=[dg.AssetCheckSpec("inline_chk", asset="with_inline_check")])
+    @traced()
+    def with_inline_check():  # type: ignore[no-untyped-def]
+        yield dg.Output(1)
+        yield dg.AssetCheckResult(passed=True)
+
+    assert dg.materialize([with_inline_check]).success
+    span = _span(spans, "with_inline_check")
+    assert span.attributes is not None
+    assert span.attributes["dagster.asset_keys"] == "with_inline_check"
+    assert span.attributes["dagster.asset_check_keys"] == "with_inline_check:inline_chk"

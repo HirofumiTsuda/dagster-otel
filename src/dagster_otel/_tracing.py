@@ -53,12 +53,7 @@ from contextlib import contextmanager
 from functools import wraps
 from typing import Any, ParamSpec, Protocol, TypeVar, overload
 
-from dagster import (
-    AssetCheckExecutionContext,
-    DagsterInvariantViolationError,
-    OpExecutionContext,
-    get_dagster_logger,
-)
+from dagster import OpExecutionContext, get_dagster_logger
 from opentelemetry import trace
 from opentelemetry.trace import Link
 
@@ -220,24 +215,29 @@ def _traced_span(context: ExecutionContext, name: str) -> Generator[None, None, 
         # branching.
         #
         # asset_check_keys (Issue #72): AssetCheckExecutionContext has no
-        # `.selected_asset_keys` either -- it has `.selected_asset_check_keys`
-        # instead (a frozenset[AssetCheckKey], not AssetKey), which can't be unified
-        # onto the same `dagster.asset_keys` attribute the same way `.job_def.name`
-        # could be (different key type entirely, `asset_key:check_name` shaped via
-        # AssetCheckKey.to_user_string(), not just an asset key), so this is a real
-        # isinstance branch, not just a differently-named same-shaped property.
+        # `.selected_asset_keys` -- it has `.selected_asset_check_keys` instead (a
+        # frozenset[AssetCheckKey], `asset_key:check_name` shaped via
+        # AssetCheckKey.to_user_string(), so kept on its own attribute rather than
+        # merged into `dagster.asset_keys`). Both keys are read from the underlying
+        # OpExecutionContext, which has both as `@public` properties for every step
+        # kind (op, asset, asset check -- confirmed against real Dagster 1.13.22), so
+        # there's no branching on the context type. This also reports an asset's
+        # inline `check_specs` checks, which the earlier isinstance branch skipped.
+        # `.op_execution_context` isn't decorated `@public` itself, but it's what
+        # Dagster's own AssetExecutionContext deprecation messages tell users to call
+        # ("Use context.op_execution_context.{attr} instead"), and on
+        # OpExecutionContext it's just `self`.
+        op_context = context.op_execution_context
         span.set_attribute("dagster.run_id", context.run.run_id)
         span.set_attribute("dagster.job_name", context.job_def.name)
         span.set_attribute("dagster.step_key", _own_step_key(context))
         span.set_attribute("dagster.retry_number", context.retry_number)
-        if isinstance(context, AssetCheckExecutionContext):
-            asset_check_keys = sorted(k.to_user_string() for k in context.selected_asset_check_keys)
-            if asset_check_keys:
-                span.set_attribute("dagster.asset_check_keys", ",".join(asset_check_keys))
-        else:
-            asset_keys = sorted(k.to_user_string() for k in context.selected_asset_keys)
-            if asset_keys:
-                span.set_attribute("dagster.asset_keys", ",".join(asset_keys))
+        asset_keys = sorted(k.to_user_string() for k in op_context.selected_asset_keys)
+        if asset_keys:
+            span.set_attribute("dagster.asset_keys", ",".join(asset_keys))
+        asset_check_keys = sorted(k.to_user_string() for k in op_context.selected_asset_check_keys)
+        if asset_check_keys:
+            span.set_attribute("dagster.asset_check_keys", ",".join(asset_check_keys))
 
         # Published unconditionally now, not just when this step turns out to have
         # no parent (the old subgraph-keyed design's behavior): every step publishes
@@ -254,18 +254,6 @@ def _traced_span(context: ExecutionContext, name: str) -> Generator[None, None, 
         finally:
             context.log.removeFilter(log_filter)
             dagster_builtin_log.removeFilter(log_filter)
-
-
-def _current_context() -> ExecutionContext:
-    """The running step's context, for a compute function that doesn't take one
-    (Issue #94). `AssetCheckExecutionContext.get()` first: inside an asset check,
-    `OpExecutionContext.get()` succeeds too but returns the plain op context, which
-    lacks `.selected_asset_check_keys` -- confirmed against real Dagster 1.13.22.
-    Outside an asset check, `AssetCheckExecutionContext.get()` raises instead."""
-    try:
-        return AssetCheckExecutionContext.get()
-    except DagsterInvariantViolationError:
-        return OpExecutionContext.get()
 
 
 def _traced_decorator(span_name: str | None) -> _TracedDecorator:
@@ -291,7 +279,7 @@ def _traced_decorator(span_name: str | None) -> _TracedDecorator:
             # Dagster's own "does this function take a context" rule from the
             # signature, can't drift from that rule if Dagster ever changes it. It
             # does still depend on the calling convention itself; see Issue #98.
-            return args[0] if args else _current_context()
+            return args[0] if args else OpExecutionContext.get()
 
         if inspect.isgeneratorfunction(func):
 
@@ -335,7 +323,7 @@ def traced(span_name: Any = None) -> Any:
 
     The compute function doesn't have to take a `context` parameter: one without it
     (`@asset def x(): ...`) is traced the same way, with the context fetched from
-    Dagster itself (see `_current_context()`).
+    Dagster itself (`OpExecutionContext.get()`).
 
     Looks up the trace context published by publish_trace_context() (falling back up
     to the run root, and across ancestor runs for retries) and activates it, so the

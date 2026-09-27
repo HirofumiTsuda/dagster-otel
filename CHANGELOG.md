@@ -4,18 +4,18 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.5.0](https://github.com/HirofumiTsuda/dagster-otel/releases/tag/v0.5.0) - 2026-09-27
+
+### Changed
+
+- **Default span name is now the Dagster node's name, not the Python function's name** ([#95](https://github.com/HirofumiTsuda/dagster-otel/issues/95)). With no explicit `span_name`, `@traced()` resolves the name at run time from the running node's `op_handle.name`, so it follows `@asset(key=...)`/`key_prefix=`/`name=`, `@op(name=...)`, `@multi_asset(name=...)`, `.alias()`, and asset checks (`<asset>_<check>`). Factory-built assets (`@asset(key=[..., table])` on one inner function) previously all shared one span name. **Span names change** for any function whose name differs from its node name, including every `@asset_check`. An explicit `@traced("name")` is unaffected. The `op_handle` dependency is tracked in [#100](https://github.com/HirofumiTsuda/dagster-otel/issues/100).
+- `dagster.asset_check_keys` is now also set on `@asset` spans whose asset declares inline `check_specs`, not only on `@asset_check` spans. Both `dagster.asset_keys` and `dagster.asset_check_keys` are now read from the step's underlying op context, without branching on the context type.
 
 ### Fixed
 
 - `@traced()` on a compute function without a `context` parameter (`@asset def x(): ...`, Dagster's own canonical form) no longer fails at run time with `x() missing 1 required positional argument: 'context'` ([#94](https://github.com/HirofumiTsuda/dagster-otel/issues/94)). The context is now fetched with Dagster's public `OpExecutionContext.get()` when the function doesn't take one. Works for `@op`, `@asset` and `@asset_check`, plain and generator functions. Type hints accept context-less functions too. Fixes the same crash under `opentelemetry-instrumentation-dagster`, which applies `traced()` automatically ([opentelemetry-instrumentation-dagster#32](https://github.com/HirofumiTsuda/opentelemetry-instrumentation-dagster/issues/32)).
 - `@traced()` on an `async def` compute function no longer breaks the step ([#93](https://github.com/HirofumiTsuda/dagster-otel/issues/93)). The wrapper used to be a plain `def`, so Dagster didn't recognize it as async and took the never-awaited coroutine as the step's output (`TypeError: cannot pickle 'coroutine' object`). Coroutines and async generators now each get a matching async wrapper, and the span covers the awaited work. For async generators, the span stays current across `yield`s, even though Dagster steps each item in a fresh asyncio Task. Fixes the same failure under `opentelemetry-instrumentation-dagster` ([opentelemetry-instrumentation-dagster#33](https://github.com/HirofumiTsuda/opentelemetry-instrumentation-dagster/issues/33)).
 - `@traced()`/`@traced_dbt()` applied to a function that's already traced no longer wraps it again ([#96](https://github.com/HirofumiTsuda/dagster-otel/issues/96)). Previously each step got two spans, and the inner layer's published trace context overwrote the outer's, so downstream steps parented onto the inner span. Now the already-traced function is returned unchanged, so the innermost (user-written) decorator and its explicit span name win. The marker is shared, so an explicit `@traced()` on a `@dbt_assets` body also stops an outer `traced_dbt()`, and vice versa. This is the normal state under `opentelemetry-instrumentation-dagster`, which applies `traced()` on top of every compute function ([opentelemetry-instrumentation-dagster#34](https://github.com/HirofumiTsuda/opentelemetry-instrumentation-dagster/issues/34)).
-
-### Changed
-
-- **Default span name is now the Dagster node's name, not the Python function's name** ([#95](https://github.com/HirofumiTsuda/dagster-otel/issues/95)). With no explicit `span_name`, `@traced()` resolves the name at run time from the running node's `op_handle.name`, so it follows `@asset(key=...)`/`key_prefix=`/`name=`, `@op(name=...)`, `@multi_asset(name=...)`, `.alias()`, and asset checks (`<asset>_<check>`). Factory-built assets (`@asset(key=[..., table])` on one inner function) previously all shared one span name. **Span names change** for any function whose name differs from its node name, including every `@asset_check`. An explicit `@traced("name")` is unaffected. The `op_handle` dependency is tracked in [#100](https://github.com/HirofumiTsuda/dagster-otel/issues/100).
-- `dagster.asset_check_keys` is now also set on `@asset` spans whose asset declares inline `check_specs`, not only on `@asset_check` spans. Both `dagster.asset_keys` and `dagster.asset_check_keys` are now read from the step's underlying op context, without branching on the context type.
 
 ## [0.4.1](https://github.com/HirofumiTsuda/dagster-otel/releases/tag/v0.4.1) - 2026-09-23
 

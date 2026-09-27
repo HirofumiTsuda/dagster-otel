@@ -4,7 +4,7 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.5.1](https://github.com/HirofumiTsuda/dagster-otel/releases/tag/v0.5.1) - 2026-09-27
 
 ### Fixed
 

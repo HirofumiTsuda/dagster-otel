@@ -59,7 +59,7 @@ test = [
 # fail in CI or vice versa -- the same problem dagster-prometheus-exporter's
 # .tool-versions file exists to avoid for golangci-lint/helm.
 lint = [
-    "mypy==2.3.1",
+    "mypy==2.4.0",
     "pyright==1.1.414",
 ]
 # Kept out of the base dependencies, same reasoning as dagster-prometheus-exporter's
